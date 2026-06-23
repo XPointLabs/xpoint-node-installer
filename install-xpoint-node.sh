@@ -19,8 +19,8 @@ RPC_ENDPOINT_ARG=""
 SIGNING_ENDPOINT_ARG=""
 XNODE_IMAGE_ARG=""
 STORAGE_IMAGE_ARG=""
-SCANNER_ADDR="${XPOINT_REALITY_SCAN_ADDR:-}"
-SCANNER_URL="${XPOINT_REALITY_SCAN_URL:-https://launchpad.net/ubuntu/+archivemirrors}"
+SCANNER_ADDR="${XPOINT_REALITY_SCAN_ADDR:-1.1.1.1/32}"
+SCANNER_URL="${XPOINT_REALITY_SCAN_URL:-}"
 SCANNER_THREADS="${XPOINT_REALITY_SCAN_THREADS:-16}"
 SCANNER_TIMEOUT="${XPOINT_REALITY_SCAN_TIMEOUT:-5}"
 
@@ -74,7 +74,7 @@ USAGE
 }
 
 log() {
-  printf '[xpoint-node] %s\n' "$*"
+  printf '[xpoint-node] %s\n' "$*" >&2
 }
 
 warn() {
@@ -317,8 +317,7 @@ import {
   createPrivateKey,
   createPublicKey,
   generateKeyPairSync,
-  randomBytes,
-  randomUUID
+  randomBytes
 } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -343,6 +342,20 @@ function newBlsScalarHex() {
       return bytes.toString('hex');
     }
   }
+}
+
+function newUuidV4() {
+  const bytes = randomBytes(16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20)
+  ].join('-');
 }
 
 function requireDerPrefix(der, prefix, name) {
@@ -407,7 +420,7 @@ const output = {
   DEEP_NODE_ED25519_PUBLIC_KEY: ed25519PublicFromSeed(ed25519PrivateKey),
   DEEP_NODE_ED25519_PRIVATE_KEY_FILE: './secrets/key_ed25519',
   DEEP_NODE_BLS_PRIVATE_KEY_FILE: './secrets/key_bls',
-  DEEP_NODE_VLESS_CLIENT_ID: randomUUID()
+  DEEP_NODE_VLESS_CLIENT_ID: newUuidV4()
 };
 
 if (args.has('--as-env') || args.has('-asenv')) {
@@ -480,22 +493,33 @@ env_get() {
   grep -E "^${key}=" "$ENV_FILE" | tail -n 1 | cut -d= -f2- || true
 }
 
-sed_escape_replacement() {
-  printf '%s' "$1" | sed -e 's/[\/&|]/\\&/g'
-}
-
 env_set() {
   local key="$1"
   local value="$2"
-  local escaped
-  escaped="$(sed_escape_replacement "$value")"
+  value="${value//$'\r'/}"
+  value="${value%%$'\n'*}"
   touch "$ENV_FILE"
   if grep -q -E "^${key}=" "$ENV_FILE"; then
-    sed -i.bak -E "s|^${key}=.*|${key}=${escaped}|" "$ENV_FILE"
-    rm -f "$ENV_FILE.bak"
+    local tmp
+    tmp="${ENV_FILE}.tmp.$$"
+    awk -v env_key="$key" -v env_value="$value" '
+      index($0, env_key "=") == 1 {
+        print env_key "=" env_value
+        replaced = 1
+        next
+      }
+      { print }
+      END {
+        if (!replaced) {
+          print env_key "=" env_value
+        }
+      }
+    ' "$ENV_FILE" >"$tmp"
+    mv "$tmp" "$ENV_FILE"
   else
     printf '%s=%s\n' "$key" "$value" >>"$ENV_FILE"
   fi
+  chmod 600 "$ENV_FILE"
 }
 
 is_zero_address() {
@@ -682,46 +706,64 @@ ensure_scanner() {
     "${DOCKER_CMD[@]}" run --rm \
       -v "$scanner_dir:/src" \
       -w /src \
-      golang:1.22-alpine \
-      sh -lc 'go build -o RealiTLScanner .'
+      golang:1.26-alpine \
+      sh -c 'go build -o RealiTLScanner .'
   fi
 
-  [ -x "$scanner_bin" ] || fail "RealiTLScanner binary was not built."
+  if [ ! -x "$scanner_bin" ]; then
+    warn "RealiTLScanner binary was not built."
+    return 1
+  fi
   printf '%s' "$scanner_bin"
 }
 
 scan_reality_sni() {
   warn "RealiTLScanner does active TLS probing. Prefer running it from an operator workstation if your provider dislikes scanning traffic."
   local scanner_bin
-  scanner_bin="$(ensure_scanner)"
+  if ! scanner_bin="$(ensure_scanner)"; then
+    return 1
+  fi
   local out_csv="$APP_DIR/reality-sni.csv"
+  local scan_log="$APP_DIR/reality-sni.log"
 
   if [ -n "$SCANNER_ADDR" ]; then
     log "Scanning Reality SNI candidates from address target: $SCANNER_ADDR"
-    "$scanner_bin" -addr "$SCANNER_ADDR" -out "$out_csv" -thread "$SCANNER_THREADS" -timeout "$SCANNER_TIMEOUT" || true
+    "$scanner_bin" -addr "$SCANNER_ADDR" -out "$out_csv" -thread "$SCANNER_THREADS" -timeout "$SCANNER_TIMEOUT" >"$scan_log" 2>&1 || true
   else
     log "Scanning Reality SNI candidates from URL: $SCANNER_URL"
-    "$scanner_bin" -url "$SCANNER_URL" -out "$out_csv" -thread "$SCANNER_THREADS" -timeout "$SCANNER_TIMEOUT" || true
+    "$scanner_bin" -url "$SCANNER_URL" -out "$out_csv" -thread "$SCANNER_THREADS" -timeout "$SCANNER_TIMEOUT" >"$scan_log" 2>&1 || true
   fi
+  cat "$scan_log" >&2 || true
 
+  local candidate=""
   if [ ! -s "$out_csv" ]; then
-    return 1
+    :
+  else
+    candidate="$(awk -F, '
+      NR > 1 {
+        d = $9
+        if (d == "") {
+          d = $3
+        }
+        gsub(/\r/, "", d)
+        gsub(/^"|"$/, "", d)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", d)
+        sub(/^\*\./, "", d)
+        if (d ~ /^[A-Za-z0-9.-]+$/ && d !~ /^[0-9.]+$/) {
+          print d
+          exit
+        }
+      }
+    ' "$out_csv")"
   fi
 
-  awk -F, '
-    NR > 1 {
-      d = $9
-      if (d == "") {
-        d = $3
-      }
-      gsub(/^"|"$/, "", d)
-      sub(/^\*\./, "", d)
-      if (d ~ /^[A-Za-z0-9.-]+$/ && d !~ /^[0-9.]+$/) {
-        print d
-        exit
-      }
-    }
-  ' "$out_csv"
+  if [ -z "$candidate" ] && [ -s "$scan_log" ]; then
+    candidate="$(sed -n -E 's/.*cert-domain="?([A-Za-z0-9.*-]+[.][A-Za-z0-9.-]+)"?.*/\1/p' "$scan_log" \
+      | sed -E 's/^[*][.]//' \
+      | head -n 1)"
+  fi
+
+  printf '%s' "$candidate"
 }
 
 ensure_reality_keys() {
@@ -736,9 +778,12 @@ ensure_reality_keys() {
     local image output private_key public_key short_id
     image="$(env_get XNODE_IMAGE)"
     log "Generating Xray Reality key pair with $image"
-    output="$("${DOCKER_CMD[@]}" run --rm --entrypoint xray "$image" x25519)"
-    private_key="$(printf '%s\n' "$output" | awk -F': ' '/Private key/ {print $2; exit}')"
-    public_key="$(printf '%s\n' "$output" | awk -F': ' '/Public key/ {print $2; exit}')"
+    if ! output="$("${DOCKER_CMD[@]}" run --rm --entrypoint xray "$image" x25519 2>&1)"; then
+      printf '%s\n' "$output" >&2
+      fail "Could not run xray from $image. Ensure the image exists and is accessible. If it is a private GHCR image, run 'docker login ghcr.io' with a token that has read:packages, or make the package public."
+    fi
+    private_key="$(printf '%s\n' "$output" | awk -F': ' '/PrivateKey|Private key/ {print $2; exit}')"
+    public_key="$(printf '%s\n' "$output" | awk -F': ' '/Password [(]PublicKey[)]|PublicKey|Public key/ {print $2; exit}')"
     short_id="$(openssl rand -hex 8)"
 
     [ -n "$private_key" ] || fail "Could not parse Reality private key from xray output."
@@ -754,7 +799,9 @@ ensure_reality_keys() {
   selected_sni="$DEFAULT_REALITY_SNI"
 
   if [ "$REALITY_MODE" = "scan" ]; then
-    selected_sni="$(scan_reality_sni || true)"
+    if ! selected_sni="$(scan_reality_sni)"; then
+      fail "Reality SNI scanner failed. Rerun with --default-reality or fix the scanner input and try --auto-sni again."
+    fi
     if [ -z "$selected_sni" ]; then
       warn "SNI scan did not return a candidate; falling back to $DEFAULT_REALITY_SNI"
       selected_sni="$DEFAULT_REALITY_SNI"
@@ -833,6 +880,10 @@ validate_for_start() {
   esac
 }
 
+local_image_exists() {
+  "${DOCKER_CMD[@]}" image inspect "$1" >/dev/null 2>&1
+}
+
 start_or_update_node() {
   if [ "$START_NODE" -ne 1 ]; then
     log "Skipping docker compose start because --no-start was used"
@@ -844,7 +895,17 @@ start_or_update_node() {
   (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config --quiet)
 
   log "Pulling images"
-  (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" pull)
+  local pull_output
+  if ! pull_output="$(cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" pull 2>&1)"; then
+    printf '%s\n' "$pull_output" >&2
+    if local_image_exists "$(env_get XNODE_IMAGE)" && local_image_exists "$(env_get DEEP_STORAGE_SERVICE_IMAGE)"; then
+      warn "Image pull failed, but both configured images are available locally; continuing with local images."
+    else
+      fail "Could not pull required images and at least one configured image is not available locally. Make the images public, run 'docker login' with registry access, or preload/build the images before rerunning."
+    fi
+  else
+    printf '%s\n' "$pull_output"
+  fi
 
   log "Starting or updating node"
   (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d)

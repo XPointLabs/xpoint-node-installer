@@ -1,6 +1,6 @@
 # XPoint Production Node Installer
 
-Private Linux installer for a production XPoint service node.
+Public Linux installer for a production XPoint service node.
 
 The installer is idempotent:
 
@@ -21,13 +21,14 @@ file as `25,000 XPNT` (`25000000000000` atomic units).
 On a fresh Ubuntu 22.04/24.04 server:
 
 ```bash
-git clone git@github.com:XPointLabs/xpoint-node-installer.git
+git clone https://github.com/XPointLabs/xpoint-node-installer.git
 cd xpoint-node-installer
 sudo ./install-xpoint-node.sh \
   --public-host seed1.xpoint.network \
   --public-port 443 \
   --operator-address 0x0000000000000000000000000000000000000000 \
-  --rewards-address 0x0000000000000000000000000000000000000000
+  --rewards-address 0x0000000000000000000000000000000000000000 \
+  --default-reality
 ```
 
 Use the actual operator and rewards wallet addresses. The example zero address
@@ -55,7 +56,8 @@ sudo ./install-xpoint-node.sh \
   --public-host node1.xpoint.network \
   --public-port 8443 \
   --operator-address 0x0000000000000000000000000000000000000000 \
-  --rewards-address 0x0000000000000000000000000000000000000000
+  --rewards-address 0x0000000000000000000000000000000000000000 \
+  --default-reality
 ```
 
 The installer writes both values into `/opt/xpoint-node/.env.node.prod`:
@@ -85,15 +87,18 @@ sudo ./install-xpoint-node.sh --auto-sni
 ```
 
 The scanner mode clones and builds `https://github.com/XTLS/RealiTLScanner`
-under `/opt/xpoint-node/tools`. By default it crawls public Ubuntu mirror
-domains and writes the scan result to `/opt/xpoint-node/reality-sni.csv`.
+under `/opt/xpoint-node/tools`. By default it checks only `1.1.1.1/32`
+with one narrow scanner target and writes the scan result to
+`/opt/xpoint-node/reality-sni.csv`.
 
 Custom scanner inputs:
 
 ```bash
-sudo ./install-xpoint-node.sh --auto-sni --scanner-url https://launchpad.net/ubuntu/+archivemirrors
-sudo ./install-xpoint-node.sh --auto-sni --scanner-addr 1.1.1.1/32
+sudo ./install-xpoint-node.sh --auto-sni --scanner-addr 1.1.1.1/32 --scanner-threads 1 --scanner-timeout 3
 ```
+
+Use broad `--scanner-url` or CIDR scans carefully. They perform active TLS
+probing and can create unwanted network noise on some VPS providers.
 
 ## Common Commands
 
