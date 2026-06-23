@@ -46,6 +46,26 @@ The node files are placed in:
 Manual configuration can be changed in `/opt/xpoint-node/.env.node.prod`.
 Re-run the installer after editing the file.
 
+## Image Access
+
+The default production images are:
+
+```text
+ghcr.io/xpointlabs/xnode:latest
+ghcr.io/xpointlabs/deep-storage-service:latest
+```
+
+They must be readable by the target server. For a public installer this usually
+means making the GitHub Container Registry packages public. If the packages
+stay private, log in on the server first with a token that has `read:packages`:
+
+```bash
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u USERNAME --password-stdin
+```
+
+If `docker compose pull` fails but both images are already preloaded locally,
+the installer continues with the local images.
+
 ## Public Port
 
 The public VLESS Reality port is operator-selectable. Port `443` is the
