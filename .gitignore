@@ -1,0 +1,7 @@
+.env*
+secrets/
+tools/
+identity.generated.env
+reality-sni*.csv
+*.tmp
+*.bak
