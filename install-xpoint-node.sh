@@ -9,6 +9,7 @@ ROTATE_REALITY=0
 REALITY_MODE="${XPOINT_REALITY_MODE:-prompt}"
 
 PUBLIC_HOST_ARG=""
+PUBLIC_PORT_ARG=""
 OPERATOR_ADDRESS_ARG=""
 REWARDS_ADDRESS_ARG=""
 REGISTRY_URL_ARG=""
@@ -49,6 +50,7 @@ Install or update a production XPoint node on Linux.
 Options:
   --dir DIR                    Installation directory (default: /opt/xpoint-node)
   --public-host HOST           Public DNS name or IP clients can reach
+  --public-port PORT           Public VLESS Reality port (default: 443)
   --operator-address ADDRESS   Staking operator wallet
   --rewards-address ADDRESS    Staking rewards wallet
   --registry-url URL           Production registry URL
@@ -89,6 +91,7 @@ parse_args() {
     case "$1" in
       --dir) APP_DIR="${2:?missing value for --dir}"; shift 2 ;;
       --public-host) PUBLIC_HOST_ARG="${2:?missing value for --public-host}"; shift 2 ;;
+      --public-port) PUBLIC_PORT_ARG="${2:?missing value for --public-port}"; shift 2 ;;
       --operator-address) OPERATOR_ADDRESS_ARG="${2:?missing value for --operator-address}"; shift 2 ;;
       --rewards-address) REWARDS_ADDRESS_ARG="${2:?missing value for --rewards-address}"; shift 2 ;;
       --registry-url) REGISTRY_URL_ARG="${2:?missing value for --registry-url}"; shift 2 ;;
@@ -225,7 +228,7 @@ services:
       Vless__GeneratedConfigPath: /etc/xnode/xray.generated.json
       Vless__WorkingDirectory: /var/lib/xnode/xray
       Vless__InboundListenHost: 0.0.0.0
-      Vless__InboundListenPort: "443"
+      Vless__InboundListenPort: ${DEEP_NODE_VLESS_CONTAINER_PORT:-443}
       Vless__PublicHost: ${DEEP_NODE_PUBLIC_HOST:?set DEEP_NODE_PUBLIC_HOST}
       Vless__PublicPort: ${DEEP_NODE_PUBLIC_PORT:-443}
       Vless__ApiIngressHost: 127.0.0.1
@@ -257,7 +260,7 @@ services:
       RegistryRegistration__ServiceNodeRewardsAddress: ${DEEP_SERVICE_NODE_REWARDS_ADDRESS:?set DEEP_SERVICE_NODE_REWARDS_ADDRESS}
       RegistryRegistration__SigningEndpoint: ${DEEP_NODE_SIGNING_ENDPOINT:?set DEEP_NODE_SIGNING_ENDPOINT}
     ports:
-      - "${DEEP_NODE_VLESS_BIND:-443}:443"
+      - "${DEEP_NODE_VLESS_BIND:-443}:${DEEP_NODE_VLESS_CONTAINER_PORT:-443}"
       - "${DEEP_NODE_API_BIND:-127.0.0.1:8080}:8080"
     volumes:
       - xnode-state:/var/lib/xnode
@@ -546,6 +549,43 @@ prompt_env() {
   env_set "$key" "${answer:-$default_value}"
 }
 
+is_tcp_port() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+}
+
+prompt_port_env() {
+  local key="$1"
+  local label="$2"
+  local default_value="$3"
+  local explicit_value="${4:-}"
+  local current
+  current="$(env_get "$key")"
+
+  if [ -n "$explicit_value" ]; then
+    is_tcp_port "$explicit_value" || fail "$key must be a TCP port from 1 to 65535."
+    env_set "$key" "$explicit_value"
+    return
+  fi
+
+  if ! is_placeholder "$current"; then
+    is_tcp_port "$current" || fail "$key must be a TCP port from 1 to 65535."
+    return
+  fi
+
+  if [ "$NON_INTERACTIVE" -eq 1 ]; then
+    env_set "$key" "$default_value"
+    return
+  fi
+
+  local answer value
+  read -r -p "$label [$default_value]: " answer
+  value="${answer:-$default_value}"
+  is_tcp_port "$value" || fail "$key must be a TCP port from 1 to 65535."
+  env_set "$key" "$value"
+}
+
 configure_env() {
   local public_host_default
   public_host_default="$(detect_public_host)"
@@ -553,6 +593,7 @@ configure_env() {
   prompt_env XNODE_IMAGE "XPoint node image" "$DEFAULT_XNODE_IMAGE" "$XNODE_IMAGE_ARG"
   prompt_env DEEP_STORAGE_SERVICE_IMAGE "Storage service image" "$DEFAULT_STORAGE_IMAGE" "$STORAGE_IMAGE_ARG"
   prompt_env DEEP_NODE_PUBLIC_HOST "Public host for this node" "$public_host_default" "$PUBLIC_HOST_ARG"
+  prompt_port_env DEEP_NODE_PUBLIC_PORT "Public VLESS Reality port" "443" "$PUBLIC_PORT_ARG"
   prompt_env DEEP_REGISTRY_URL "Registry API URL" "$DEFAULT_REGISTRY_URL" "$REGISTRY_URL_ARG"
   prompt_env DEEP_OPERATOR_ADDRESS "Staking operator wallet" "0x0000000000000000000000000000000000000000" "$OPERATOR_ADDRESS_ARG"
 
@@ -567,8 +608,11 @@ configure_env() {
   env_set DEEP_SERVICE_NODE_REWARDS_ADDRESS "$PROD_SERVICE_NODE_REWARDS"
   env_set DEEP_ARBITRUM_CHAIN_ID "42161"
   env_set DEEP_NETWORK "mainnet"
-  env_set DEEP_NODE_PUBLIC_PORT "443"
-  env_set DEEP_NODE_VLESS_BIND "$(env_get DEEP_NODE_VLESS_BIND | grep -E '.+' || printf '443')"
+  if [ -n "$PUBLIC_PORT_ARG" ]; then
+    env_set DEEP_NODE_VLESS_BIND "$PUBLIC_PORT_ARG"
+  else
+    env_set DEEP_NODE_VLESS_BIND "$(env_get DEEP_NODE_VLESS_BIND | grep -E '.+' || env_get DEEP_NODE_PUBLIC_PORT)"
+  fi
   env_set DEEP_NODE_API_BIND "$(env_get DEEP_NODE_API_BIND | grep -E '.+' || printf '127.0.0.1:8080')"
   env_set DEEP_NODE_STORAGE_BIND "$(env_get DEEP_NODE_STORAGE_BIND | grep -E '.+' || printf '127.0.0.1:22021')"
   env_set DEEP_STORAGE_RPC_URL "$(env_get DEEP_STORAGE_RPC_URL | grep -E '.+' || printf 'http://storage-service:8080')"

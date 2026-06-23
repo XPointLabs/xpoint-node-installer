@@ -25,6 +25,7 @@ git clone git@github.com:XPointLabs/xpoint-node-installer.git
 cd xpoint-node-installer
 sudo ./install-xpoint-node.sh \
   --public-host seed1.xpoint.network \
+  --public-port 443 \
   --operator-address 0x0000000000000000000000000000000000000000 \
   --rewards-address 0x0000000000000000000000000000000000000000
 ```
@@ -43,6 +44,31 @@ The node files are placed in:
 
 Manual configuration can be changed in `/opt/xpoint-node/.env.node.prod`.
 Re-run the installer after editing the file.
+
+## Public Port
+
+The public VLESS Reality port is operator-selectable. Port `443` is the
+recommended default, but the node can run on any reachable TCP port:
+
+```bash
+sudo ./install-xpoint-node.sh \
+  --public-host node1.xpoint.network \
+  --public-port 8443 \
+  --operator-address 0x0000000000000000000000000000000000000000 \
+  --rewards-address 0x0000000000000000000000000000000000000000
+```
+
+The installer writes both values into `/opt/xpoint-node/.env.node.prod`:
+
+```text
+DEEP_NODE_PUBLIC_PORT=8443
+DEEP_NODE_VLESS_BIND=8443
+```
+
+Keep them equal unless a reverse proxy, NAT rule, or cloud load balancer maps a
+different external port to the local Docker bind. The node publishes
+`DEEP_NODE_PUBLIC_HOST:DEEP_NODE_PUBLIC_PORT` in signed relay contacts, and
+clients use that advertised port for onion routing.
 
 ## Reality SNI
 
