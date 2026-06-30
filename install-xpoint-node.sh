@@ -806,6 +806,9 @@ choose_reality_mode_if_needed() {
   if [ "$REALITY_MODE" != "prompt" ]; then
     return
   fi
+  if ! is_placeholder "$(env_get DEEP_NODE_REALITY_SERVER_NAME)"; then
+    return
+  fi
   if [ "$NON_INTERACTIVE" -eq 1 ]; then
     REALITY_MODE="default"
     return

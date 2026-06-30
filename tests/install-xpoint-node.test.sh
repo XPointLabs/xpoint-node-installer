@@ -99,6 +99,15 @@ ENV
   assert_eq '' "$(env_get DEEP_NODE_RPC_ENDPOINT)" 'legacy RPC endpoint removed'
 )
 
+test_existing_reality_sni_is_preserved() (
+  source "$INSTALLER"
+  env_get() { printf 'cloudflare-dns.com'; }
+  NON_INTERACTIVE=1
+  REALITY_MODE=prompt
+  choose_reality_mode_if_needed
+  assert_eq 'prompt' "$REALITY_MODE" 'existing Reality SNI preserved'
+)
+
 test_bounded_scanner_result() (
   source "$INSTALLER"
   local temp_dir fake_scanner candidate
@@ -141,5 +150,6 @@ test_external_fallback
 test_scanner_option_precedence
 test_peer_rpc_option
 test_peer_endpoint_configuration
+test_existing_reality_sni_is_preserved
 test_bounded_scanner_result
 printf 'PASS: install-xpoint-node tests\n'
