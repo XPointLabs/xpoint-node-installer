@@ -32,7 +32,12 @@ test_ipv4_validation() (
 
 test_configured_public_ip() (
   source "$INSTALLER"
-  env_get() { printf '93.184.216.34'; }
+  env_get() {
+    case "$1" in
+      DEEP_NODE_PUBLIC_IP) printf '93.184.216.34' ;;
+      *) printf 'node.example.invalid' ;;
+    esac
+  }
   detect_external_public_ipv4() { return 1; }
   assert_eq '93.184.216.34' "$(detect_node_public_ipv4)" 'configured public IPv4'
   assert_eq '93.184.216.34' "$(default_scanner_addr)" 'automatic scanner origin'
@@ -63,6 +68,35 @@ test_scanner_option_precedence() (
   parse_args --scanner-addr 93.184.216.0/24 --scanner-url https://example.com/targets
   assert_eq '' "$SCANNER_ADDR" 'scanner URL clears address mode'
   assert_eq 'https://example.com/targets' "$SCANNER_URL" 'last scanner URL option wins'
+)
+
+test_peer_rpc_option() (
+  source "$INSTALLER"
+  parse_args --peer-rpc-port 32020
+  assert_eq '32020' "$PEER_RPC_PORT_ARG" 'peer RPC port option'
+)
+
+test_peer_endpoint_configuration() (
+  source "$INSTALLER"
+  local temp_dir
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  APP_DIR="$temp_dir"
+  ENV_FILE="$temp_dir/.env.node.prod"
+  cat >"$ENV_FILE" <<'ENV'
+DEEP_NODE_PUBLIC_HOST=node.example.invalid
+DEEP_NODE_PUBLIC_PORT=443
+DEEP_NODE_PEER_RPC_PORT=22020
+DEEP_NODE_RPC_ENDPOINT=http://127.0.0.1:8080/api/session/rpc
+DEEP_OPERATOR_ADDRESS=0x1111111111111111111111111111111111111111
+ENV
+  NON_INTERACTIVE=1
+  detect_public_host() { printf '93.184.216.34'; }
+  detect_node_public_ipv4() { printf '93.184.216.34'; }
+  configure_env
+  assert_eq '93.184.216.34' "$(env_get DEEP_NODE_PUBLIC_IP)" 'generated public IP'
+  assert_eq 'http://93.184.216.34:22020/api/peer/onion' "$(env_get DEEP_NODE_PEER_RPC_ENDPOINT)" 'generated peer endpoint'
+  assert_eq '' "$(env_get DEEP_NODE_RPC_ENDPOINT)" 'legacy RPC endpoint removed'
 )
 
 test_bounded_scanner_result() (
@@ -105,5 +139,7 @@ test_configured_public_ip
 test_resolved_public_host
 test_external_fallback
 test_scanner_option_precedence
+test_peer_rpc_option
+test_peer_endpoint_configuration
 test_bounded_scanner_result
 printf 'PASS: install-xpoint-node tests\n'

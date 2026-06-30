@@ -9,6 +9,7 @@ The installer is idempotent:
 - writes the production compose file;
 - creates `.env.node.prod` only if missing and preserves manual edits;
 - generates Ed25519, BLS, VLESS UUID, and Xray Reality keys when missing;
+- detects the node public IPv4 and publishes an Ed25519-authenticated peer endpoint;
 - pulls the configured images and runs `docker compose up -d`;
 - on repeated runs, pulls newer image tags and updates the running node.
 
@@ -24,8 +25,9 @@ On a fresh Ubuntu 22.04/24.04 server:
 git clone https://github.com/XPointLabs/xpoint-node-installer.git
 cd xpoint-node-installer
 sudo ./install-xpoint-node.sh \
-  --public-host seed1.xpoint.network \
+  --public-host 203.0.113.10 \
   --public-port 443 \
+  --peer-rpc-port 22020 \
   --operator-address 0x0000000000000000000000000000000000000000 \
   --rewards-address 0x0000000000000000000000000000000000000000 \
   --default-reality
@@ -33,6 +35,12 @@ sudo ./install-xpoint-node.sh \
 
 Use the actual operator and rewards wallet addresses. The example zero address
 will not pass the start validation.
+
+A domain and an operator-managed TLS certificate are not required. Xray Reality
+provides the client-facing encrypted transport, while node-to-node onion hops
+use a separate Ed25519-authenticated endpoint. `--public-host` accepts either a
+DNS name or the server's public IP. The installer determines and publishes the
+origin IPv4 independently, so a proxied DNS record is not used for peer traffic.
 
 The node files are placed in:
 
@@ -91,6 +99,32 @@ Keep them equal unless a reverse proxy, NAT rule, or cloud load balancer maps a
 different external port to the local Docker bind. The node publishes
 `DEEP_NODE_PUBLIC_HOST:DEEP_NODE_PUBLIC_PORT` in signed relay contacts, and
 clients use that advertised port for onion routing.
+
+## Node-to-node Port
+
+The signed peer RPC uses TCP port `22020` by default. It is intentionally
+separate from the Reality listener because it has a different protocol and
+access policy:
+
+```bash
+sudo ./install-xpoint-node.sh --peer-rpc-port 32020
+```
+
+The installer generates these values on every run:
+
+```text
+DEEP_NODE_PUBLIC_IP=203.0.113.10
+DEEP_NODE_PEER_RPC_PORT=32020
+DEEP_NODE_PEER_RPC_BIND=32020
+DEEP_NODE_PEER_RPC_ENDPOINT=http://203.0.113.10:32020/api/peer/onion
+```
+
+The endpoint does not carry plaintext messages. Onion payloads remain encrypted,
+and every outer request is signed by the sending node's Ed25519 identity with a
+timestamp and one-time nonce. The receiver verifies current signed membership,
+rejects replays, and rate-limits the listener. If UFW is already active, the
+installer opens only the selected Reality and peer TCP ports; it never enables
+or changes the firewall's global policy by itself.
 
 ## Reality SNI
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.2.0"
+INSTALLER_VERSION="0.3.0"
 APP_DIR="${XPOINT_NODE_DIR:-/opt/xpoint-node}"
 NON_INTERACTIVE=0
 START_NODE=1
@@ -15,7 +15,7 @@ REWARDS_ADDRESS_ARG=""
 REGISTRY_URL_ARG=""
 RPC_URL_ARG=""
 FALLBACK_RPC_URLS_ARG=""
-RPC_ENDPOINT_ARG=""
+PEER_RPC_PORT_ARG=""
 SIGNING_ENDPOINT_ARG=""
 XNODE_IMAGE_ARG=""
 STORAGE_IMAGE_ARG=""
@@ -57,7 +57,7 @@ Options:
   --registry-url URL           Production registry URL
   --rpc-url URL                Arbitrum One RPC URL used by the node backend
   --fallback-rpc-urls URLS     Comma-separated fallback Arbitrum One RPC URLs
-  --rpc-endpoint URL           Private/control-plane node RPC endpoint
+  --peer-rpc-port PORT         Public signed node-to-node RPC port (default: 22020)
   --signing-endpoint URL       Private/control-plane BLS signing endpoint
   --xnode-image IMAGE          XPoint node image
   --storage-image IMAGE        Per-node storage service image
@@ -99,7 +99,7 @@ parse_args() {
       --registry-url) REGISTRY_URL_ARG="${2:?missing value for --registry-url}"; shift 2 ;;
       --rpc-url) RPC_URL_ARG="${2:?missing value for --rpc-url}"; shift 2 ;;
       --fallback-rpc-urls) FALLBACK_RPC_URLS_ARG="${2:?missing value for --fallback-rpc-urls}"; shift 2 ;;
-      --rpc-endpoint) RPC_ENDPOINT_ARG="${2:?missing value for --rpc-endpoint}"; shift 2 ;;
+      --peer-rpc-port) PEER_RPC_PORT_ARG="${2:?missing value for --peer-rpc-port}"; shift 2 ;;
       --signing-endpoint) SIGNING_ENDPOINT_ARG="${2:?missing value for --signing-endpoint}"; shift 2 ;;
       --xnode-image) XNODE_IMAGE_ARG="${2:?missing value for --xnode-image}"; shift 2 ;;
       --storage-image) STORAGE_IMAGE_ARG="${2:?missing value for --storage-image}"; shift 2 ;;
@@ -206,17 +206,20 @@ services:
     stop_grace_period: 30s
     environment:
       ASPNETCORE_ENVIRONMENT: Production
-      ASPNETCORE_URLS: http://0.0.0.0:8080
+      ASPNETCORE_URLS: http://0.0.0.0:8080;http://0.0.0.0:8081
 
       Node__ApiListenUrl: http://0.0.0.0:8080
+      Node__PeerRpcListenUrl: http://0.0.0.0:8081
       Node__DataDirectory: /var/lib/xnode
       Node__RouterId: ${DEEP_NODE_ED25519_PUBLIC_KEY:?set DEEP_NODE_ED25519_PUBLIC_KEY}
       Node__Ed25519PrivateKeyPath: /run/secrets/node-ed25519-private-key
       Node__IsRelay: "true"
       Node__Network: ${DEEP_NETWORK:-mainnet}
       Node__PublicHost: ${DEEP_NODE_PUBLIC_HOST:?set DEEP_NODE_PUBLIC_HOST}
+      Node__PublicIp: ${DEEP_NODE_PUBLIC_IP:?set DEEP_NODE_PUBLIC_IP}
       Node__PublicPort: ${DEEP_NODE_PUBLIC_PORT:-443}
-      Node__PublicRpcEndpoint: ${DEEP_NODE_RPC_ENDPOINT:?set DEEP_NODE_RPC_ENDPOINT}
+      Node__PublicPeerRpcPort: ${DEEP_NODE_PEER_RPC_PORT:-22020}
+      Node__PublicPeerRpcEndpoint: ${DEEP_NODE_PEER_RPC_ENDPOINT:?set DEEP_NODE_PEER_RPC_ENDPOINT}
 
       Runtime__BootstrapFromStorage: ${DEEP_NODE_BOOTSTRAP_FROM_STORAGE:-true}
       Runtime__HeartbeatInterval: ${DEEP_NODE_RUNTIME_HEARTBEAT_INTERVAL:-00:00:30}
@@ -265,6 +268,7 @@ services:
     ports:
       - "${DEEP_NODE_VLESS_BIND:-443}:${DEEP_NODE_VLESS_CONTAINER_PORT:-443}"
       - "${DEEP_NODE_API_BIND:-127.0.0.1:8080}:8080"
+      - "${DEEP_NODE_PEER_RPC_BIND:-22020}:8081"
     volumes:
       - xnode-state:/var/lib/xnode
       - xnode-config:/etc/xnode
@@ -450,11 +454,14 @@ DEEP_STORAGE_SERVICE_IMAGE=$DEFAULT_STORAGE_IMAGE
 DEEP_NETWORK=mainnet
 
 DEEP_NODE_PUBLIC_HOST=
+DEEP_NODE_PUBLIC_IP=
 DEEP_NODE_PUBLIC_PORT=443
 DEEP_NODE_VLESS_BIND=443
 DEEP_NODE_API_BIND=127.0.0.1:8080
+DEEP_NODE_PEER_RPC_PORT=22020
+DEEP_NODE_PEER_RPC_BIND=22020
+DEEP_NODE_PEER_RPC_ENDPOINT=
 DEEP_NODE_STORAGE_BIND=127.0.0.1:22021
-DEEP_NODE_RPC_ENDPOINT=http://127.0.0.1:8080/api/session/rpc
 DEEP_NODE_SIGNING_ENDPOINT=http://127.0.0.1:8080/api/staking/quorum/sign
 DEEP_STORAGE_RPC_URL=http://storage-service:8080
 DEEP_PUSH_NOTIFY_URL=$DEFAULT_PUSH_NOTIFY_URL
@@ -522,6 +529,16 @@ env_set() {
   else
     printf '%s=%s\n' "$key" "$value" >>"$ENV_FILE"
   fi
+  chmod 600 "$ENV_FILE"
+}
+
+env_unset() {
+  local key="$1"
+  [ -f "$ENV_FILE" ] || return 0
+  local tmp
+  tmp="${ENV_FILE}.tmp.$$"
+  awk -v env_key="$key" 'index($0, env_key "=") != 1 { print }' "$ENV_FILE" >"$tmp"
+  mv "$tmp" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
 }
 
@@ -610,9 +627,14 @@ detect_external_public_ipv4() {
 }
 
 detect_node_public_ipv4() {
-  local configured_host candidate
+  local configured_ip configured_host candidate
+  configured_ip="$(env_get DEEP_NODE_PUBLIC_IP)"
   configured_host="$(env_get DEEP_NODE_PUBLIC_HOST)"
 
+  if is_public_ipv4 "$configured_ip"; then
+    printf '%s' "$configured_ip"
+    return
+  fi
   if candidate="$(resolve_host_public_ipv4 "$configured_host")"; then
     printf '%s' "$candidate"
     return
@@ -714,13 +736,14 @@ prompt_port_env() {
 }
 
 configure_env() {
-  local public_host_default
+  local public_host_default public_ipv4 peer_port
   public_host_default="$(detect_public_host)"
 
   prompt_env XNODE_IMAGE "XPoint node image" "$DEFAULT_XNODE_IMAGE" "$XNODE_IMAGE_ARG"
   prompt_env DEEP_STORAGE_SERVICE_IMAGE "Storage service image" "$DEFAULT_STORAGE_IMAGE" "$STORAGE_IMAGE_ARG"
   prompt_env DEEP_NODE_PUBLIC_HOST "Public host for this node" "$public_host_default" "$PUBLIC_HOST_ARG"
   prompt_port_env DEEP_NODE_PUBLIC_PORT "Public VLESS Reality port" "443" "$PUBLIC_PORT_ARG"
+  prompt_port_env DEEP_NODE_PEER_RPC_PORT "Public signed node-to-node RPC port" "22020" "$PEER_RPC_PORT_ARG"
   prompt_env DEEP_REGISTRY_URL "Registry API URL" "$DEFAULT_REGISTRY_URL" "$REGISTRY_URL_ARG"
   prompt_env DEEP_OPERATOR_ADDRESS "Staking operator wallet" "0x0000000000000000000000000000000000000000" "$OPERATOR_ADDRESS_ARG"
 
@@ -729,12 +752,19 @@ configure_env() {
   prompt_env DEEP_REWARDS_ADDRESS "Rewards wallet" "$operator_value" "$REWARDS_ADDRESS_ARG"
   prompt_env DEEP_ARBITRUM_RPC_URL "Arbitrum One RPC URL" "$DEFAULT_ARBITRUM_RPC_URL" "$RPC_URL_ARG"
   prompt_env DEEP_ARBITRUM_FALLBACK_RPC_URLS "Fallback Arbitrum One RPC URLs" "$DEFAULT_ARBITRUM_RPC_URL" "$FALLBACK_RPC_URLS_ARG"
-  prompt_env DEEP_NODE_RPC_ENDPOINT "Control-plane RPC endpoint" "http://127.0.0.1:8080/api/session/rpc" "$RPC_ENDPOINT_ARG"
   prompt_env DEEP_NODE_SIGNING_ENDPOINT "Control-plane BLS signing endpoint" "http://127.0.0.1:8080/api/staking/quorum/sign" "$SIGNING_ENDPOINT_ARG"
 
   env_set DEEP_SERVICE_NODE_REWARDS_ADDRESS "$PROD_SERVICE_NODE_REWARDS"
   env_set DEEP_ARBITRUM_CHAIN_ID "42161"
   env_set DEEP_NETWORK "mainnet"
+  env_unset DEEP_NODE_RPC_ENDPOINT
+  if ! public_ipv4="$(detect_node_public_ipv4)"; then
+    fail "Could not determine this node's public IPv4. Set DEEP_NODE_PUBLIC_IP in $ENV_FILE and rerun the installer."
+  fi
+  env_set DEEP_NODE_PUBLIC_IP "$public_ipv4"
+  peer_port="$(env_get DEEP_NODE_PEER_RPC_PORT)"
+  env_set DEEP_NODE_PEER_RPC_BIND "$peer_port"
+  env_set DEEP_NODE_PEER_RPC_ENDPOINT "http://${public_ipv4}:${peer_port}/api/peer/onion"
   if [ -n "$PUBLIC_PORT_ARG" ]; then
     env_set DEEP_NODE_VLESS_BIND "$PUBLIC_PORT_ARG"
   else
@@ -961,7 +991,9 @@ validate_for_start() {
     XNODE_IMAGE \
     DEEP_STORAGE_SERVICE_IMAGE \
     DEEP_NODE_PUBLIC_HOST \
-    DEEP_NODE_RPC_ENDPOINT \
+    DEEP_NODE_PUBLIC_IP \
+    DEEP_NODE_PEER_RPC_PORT \
+    DEEP_NODE_PEER_RPC_ENDPOINT \
     DEEP_NODE_SIGNING_ENDPOINT \
     DEEP_REGISTRY_URL \
     DEEP_ARBITRUM_RPC_URL \
@@ -1001,14 +1033,31 @@ validate_for_start() {
     exit 2
   fi
 
-  local rpc_endpoint signing_endpoint
-  rpc_endpoint="$(env_get DEEP_NODE_RPC_ENDPOINT)"
-  signing_endpoint="$(env_get DEEP_NODE_SIGNING_ENDPOINT)"
-  case "$rpc_endpoint $signing_endpoint" in
-    *127.0.0.1*|*localhost*)
-      warn "Control-plane endpoints point to localhost. This is fine only if registry/staking reach the node through a private proxy or local deployment."
-      ;;
-  esac
+  local public_ip public_port peer_port peer_endpoint
+  public_ip="$(env_get DEEP_NODE_PUBLIC_IP)"
+  public_port="$(env_get DEEP_NODE_PUBLIC_PORT)"
+  peer_port="$(env_get DEEP_NODE_PEER_RPC_PORT)"
+  peer_endpoint="$(env_get DEEP_NODE_PEER_RPC_ENDPOINT)"
+  is_public_ipv4 "$public_ip" || fail "DEEP_NODE_PUBLIC_IP must be a public IPv4 address."
+  is_tcp_port "$public_port" || fail "DEEP_NODE_PUBLIC_PORT must be a TCP port from 1 to 65535."
+  is_tcp_port "$peer_port" || fail "DEEP_NODE_PEER_RPC_PORT must be a TCP port from 1 to 65535."
+  [ "$public_port" != "$peer_port" ] || fail "Reality and node-to-node RPC must use different public ports."
+  [ "$peer_endpoint" = "http://${public_ip}:${peer_port}/api/peer/onion" ] || \
+    fail "DEEP_NODE_PEER_RPC_ENDPOINT must match the generated public IP and peer port."
+}
+
+configure_firewall_if_active() {
+  command_exists ufw || return 0
+  if ! ufw status 2>/dev/null | grep -q '^Status: active'; then
+    return 0
+  fi
+
+  local reality_port peer_port
+  reality_port="$(env_get DEEP_NODE_PUBLIC_PORT)"
+  peer_port="$(env_get DEEP_NODE_PEER_RPC_PORT)"
+  log "Allowing XPoint transport ports in active UFW"
+  run_as_root ufw allow "${reality_port}/tcp" comment 'XPoint Reality transport' >/dev/null
+  run_as_root ufw allow "${peer_port}/tcp" comment 'XPoint signed peer RPC' >/dev/null
 }
 
 local_image_exists() {
@@ -1055,6 +1104,7 @@ main() {
   configure_env
   generate_identity_if_needed
   ensure_reality_keys
+  configure_firewall_if_active
   start_or_update_node
 
   log "Done. Config: $ENV_FILE"
