@@ -143,12 +143,12 @@ require_linux() {
 
 ensure_base_packages() {
   if ! command_exists apt-get; then
-    fail "Only apt-based Linux distributions are automated for now. Install Docker, curl, openssl, git, nodejs, and npm manually, then rerun."
+    fail "Only apt-based Linux distributions are automated for now. Install Docker, curl, openssl, git, and nodejs manually, then rerun."
   fi
 
   log "Installing base packages if missing"
   run_as_root apt-get update
-  run_as_root apt-get install -y ca-certificates curl gnupg openssl git nodejs npm
+  run_as_root apt-get install -y ca-certificates curl gnupg openssl git nodejs
 }
 
 ensure_docker() {
