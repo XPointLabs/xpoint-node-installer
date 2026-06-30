@@ -107,18 +107,24 @@ sudo ./install-xpoint-node.sh --auto-sni
 ```
 
 The scanner mode clones and builds `https://github.com/XTLS/RealiTLScanner`
-under `/opt/xpoint-node/tools`. By default it checks only `1.1.1.1/32`
-with one narrow scanner target and writes the scan result to
-`/opt/xpoint-node/reality-sni.csv`.
+under `/opt/xpoint-node/tools`. By default it resolves the configured
+`DEEP_NODE_PUBLIC_HOST` to the node's public IPv4 and uses that address as the
+origin for RealiTLScanner's outward search. If the configured host cannot be
+resolved, the installer detects the node's public IPv4 over HTTPS. Address
+scans stop after the first suitable candidate or after 60 seconds by default,
+and results are written to `/opt/xpoint-node/reality-sni.csv`.
 
 Custom scanner inputs:
 
 ```bash
-sudo ./install-xpoint-node.sh --auto-sni --scanner-addr 1.1.1.1/32 --scanner-threads 1 --scanner-timeout 3
+sudo ./install-xpoint-node.sh --auto-sni --scanner-addr 203.0.113.10 --scanner-threads 8 --scanner-timeout 3 --scanner-max-seconds 90
 ```
 
-Use broad `--scanner-url` or CIDR scans carefully. They perform active TLS
-probing and can create unwanted network noise on some VPS providers.
+`--scanner-addr` and `--scanner-url` override automatic node-IP detection. Keep
+address scans bounded: a bare IP enables RealiTLScanner's outward infinite
+mode, which this installer limits with `--scanner-max-seconds`; a `/32` checks
+exactly one IPv4 address. Broad URL or CIDR scans perform active TLS probing and
+can create unwanted network noise on some VPS providers.
 
 ## Common Commands
 

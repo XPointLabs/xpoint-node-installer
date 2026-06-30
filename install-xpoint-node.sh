@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.1.0"
+INSTALLER_VERSION="0.2.0"
 APP_DIR="${XPOINT_NODE_DIR:-/opt/xpoint-node}"
 NON_INTERACTIVE=0
 START_NODE=1
@@ -19,10 +19,11 @@ RPC_ENDPOINT_ARG=""
 SIGNING_ENDPOINT_ARG=""
 XNODE_IMAGE_ARG=""
 STORAGE_IMAGE_ARG=""
-SCANNER_ADDR="${XPOINT_REALITY_SCAN_ADDR:-1.1.1.1/32}"
+SCANNER_ADDR="${XPOINT_REALITY_SCAN_ADDR:-}"
 SCANNER_URL="${XPOINT_REALITY_SCAN_URL:-}"
 SCANNER_THREADS="${XPOINT_REALITY_SCAN_THREADS:-16}"
 SCANNER_TIMEOUT="${XPOINT_REALITY_SCAN_TIMEOUT:-5}"
+SCANNER_MAX_SECONDS="${XPOINT_REALITY_SCAN_MAX_SECONDS:-60}"
 
 PROD_STAKE_ATOMIC="25000000000000"
 PROD_SERVICE_NODE_REWARDS="0xc52284b7aBAebbEF7BdE0E1ca8251B44AeA12F5f"
@@ -62,10 +63,11 @@ Options:
   --storage-image IMAGE        Per-node storage service image
   --default-reality            Use the default Reality SNI
   --auto-sni                   Select Reality SNI with XTLS/RealiTLScanner
-  --scanner-url URL            URL for RealiTLScanner crawl mode
-  --scanner-addr TARGET        Address/CIDR/domain for RealiTLScanner addr mode
+  --scanner-url URL            URL for RealiTLScanner crawl mode (overrides automatic node-IP scan)
+  --scanner-addr TARGET        Explicit address/CIDR/domain override (default: node public IPv4)
   --scanner-threads N          Scanner worker count (default: 16)
   --scanner-timeout SECONDS    Scanner timeout (default: 5)
+  --scanner-max-seconds N      Maximum total address scan time (default: 60)
   --rotate-reality             Regenerate Reality keys and re-apply SNI mode
   --no-start                   Prepare files but do not run docker compose up
   -y, --yes                    Non-interactive; use defaults and fail if required values stay missing
@@ -104,9 +106,10 @@ parse_args() {
       --default-reality) REALITY_MODE="default"; shift ;;
       --auto-sni) REALITY_MODE="scan"; shift ;;
       --scanner-url) SCANNER_URL="${2:?missing value for --scanner-url}"; SCANNER_ADDR=""; shift 2 ;;
-      --scanner-addr) SCANNER_ADDR="${2:?missing value for --scanner-addr}"; shift 2 ;;
+      --scanner-addr) SCANNER_ADDR="${2:?missing value for --scanner-addr}"; SCANNER_URL=""; shift 2 ;;
       --scanner-threads) SCANNER_THREADS="${2:?missing value for --scanner-threads}"; shift 2 ;;
       --scanner-timeout) SCANNER_TIMEOUT="${2:?missing value for --scanner-timeout}"; shift 2 ;;
+      --scanner-max-seconds) SCANNER_MAX_SECONDS="${2:?missing value for --scanner-max-seconds}"; shift 2 ;;
       --rotate-reality) ROTATE_REALITY=1; shift ;;
       --no-start) START_NODE=0; shift ;;
       -y|--yes) NON_INTERACTIVE=1; shift ;;
@@ -537,13 +540,113 @@ is_placeholder() {
   return 1
 }
 
+is_ipv4() {
+  local value="$1"
+  local -a octets
+  local octet
+
+  IFS=. read -r -a octets <<<"$value"
+  [ "${#octets[@]}" -eq 4 ] || return 1
+  for octet in "${octets[@]}"; do
+    [[ "$octet" =~ ^[0-9]{1,3}$ ]] || return 1
+    [ "$((10#$octet))" -le 255 ] || return 1
+  done
+}
+
+is_public_ipv4() {
+  local value="$1"
+  local a b c d
+  is_ipv4 "$value" || return 1
+  IFS=. read -r a b c d <<<"$value"
+  a=$((10#$a)); b=$((10#$b)); c=$((10#$c)); d=$((10#$d))
+
+  [ "$a" -ne 0 ] || return 1
+  [ "$a" -ne 10 ] || return 1
+  [ "$a" -ne 127 ] || return 1
+  [ "$a" -lt 224 ] || return 1
+  ! { [ "$a" -eq 100 ] && [ "$b" -ge 64 ] && [ "$b" -le 127 ]; } || return 1
+  ! { [ "$a" -eq 169 ] && [ "$b" -eq 254 ]; } || return 1
+  ! { [ "$a" -eq 172 ] && [ "$b" -ge 16 ] && [ "$b" -le 31 ]; } || return 1
+  ! { [ "$a" -eq 192 ] && [ "$b" -eq 0 ] && { [ "$c" -eq 0 ] || [ "$c" -eq 2 ]; }; } || return 1
+  ! { [ "$a" -eq 192 ] && [ "$b" -eq 88 ] && [ "$c" -eq 99 ]; } || return 1
+  ! { [ "$a" -eq 192 ] && [ "$b" -eq 168 ]; } || return 1
+  ! { [ "$a" -eq 198 ] && { [ "$b" -eq 18 ] || [ "$b" -eq 19 ]; }; } || return 1
+  ! { [ "$a" -eq 198 ] && [ "$b" -eq 51 ] && [ "$c" -eq 100 ]; } || return 1
+  ! { [ "$a" -eq 203 ] && [ "$b" -eq 0 ] && [ "$c" -eq 113 ]; } || return 1
+}
+
+resolve_host_public_ipv4() {
+  local host="$1"
+  local candidate
+  [ -n "$host" ] || return 1
+
+  if is_public_ipv4 "$host"; then
+    printf '%s' "$host"
+    return
+  fi
+  command_exists getent || return 1
+
+  while read -r candidate _; do
+    if is_public_ipv4 "$candidate"; then
+      printf '%s' "$candidate"
+      return
+    fi
+  done < <(getent ahostsv4 "$host" 2>/dev/null || true)
+  return 1
+}
+
+detect_external_public_ipv4() {
+  local endpoint candidate
+  for endpoint in https://checkip.amazonaws.com https://api.ipify.org; do
+    candidate="$(curl -4 --proto '=https' --tlsv1.2 -fsS \
+      --connect-timeout 3 --max-time 5 "$endpoint" 2>/dev/null \
+      | tr -d '[:space:]' || true)"
+    if is_public_ipv4 "$candidate"; then
+      printf '%s' "$candidate"
+      return
+    fi
+  done
+  return 1
+}
+
+detect_node_public_ipv4() {
+  local configured_host candidate
+  configured_host="$(env_get DEEP_NODE_PUBLIC_HOST)"
+
+  if candidate="$(resolve_host_public_ipv4 "$configured_host")"; then
+    printf '%s' "$candidate"
+    return
+  fi
+  if candidate="$(detect_external_public_ipv4)"; then
+    printf '%s' "$candidate"
+    return
+  fi
+  return 1
+}
+
 detect_public_host() {
   local host
+  if host="$(detect_external_public_ipv4)"; then
+    printf '%s' "$host"
+    return
+  fi
+
   host="$(hostname -f 2>/dev/null || hostname 2>/dev/null || true)"
   case "$host" in
     ""|localhost|localhost.localdomain) printf 'node.example.invalid' ;;
     *) printf '%s' "$host" ;;
   esac
+}
+
+default_scanner_addr() {
+  local public_ipv4
+  if ! public_ipv4="$(detect_node_public_ipv4)"; then
+    warn "Could not determine the node public IPv4 for the Reality SNI scan. Use --scanner-addr explicitly."
+    return 1
+  fi
+
+  log "Using node public IPv4 as the Reality SNI scan origin: $public_ipv4"
+  printf '%s' "$public_ipv4"
 }
 
 prompt_env() {
@@ -725,13 +828,41 @@ scan_reality_sni() {
   fi
   local out_csv="$APP_DIR/reality-sni.csv"
   local scan_log="$APP_DIR/reality-sni.log"
+  local scan_addr="$SCANNER_ADDR"
 
-  if [ -n "$SCANNER_ADDR" ]; then
-    log "Scanning Reality SNI candidates from address target: $SCANNER_ADDR"
-    "$scanner_bin" -addr "$SCANNER_ADDR" -out "$out_csv" -thread "$SCANNER_THREADS" -timeout "$SCANNER_TIMEOUT" >"$scan_log" 2>&1 || true
-  else
+  if [ -n "$SCANNER_URL" ]; then
     log "Scanning Reality SNI candidates from URL: $SCANNER_URL"
     "$scanner_bin" -url "$SCANNER_URL" -out "$out_csv" -thread "$SCANNER_THREADS" -timeout "$SCANNER_TIMEOUT" >"$scan_log" 2>&1 || true
+  else
+    if [ -z "$scan_addr" ]; then
+      scan_addr="$(default_scanner_addr)" || return 1
+    fi
+    if ! [[ "$SCANNER_MAX_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+      warn "Reality scanner maximum duration must be a positive integer: $SCANNER_MAX_SECONDS"
+      return 1
+    fi
+    command_exists timeout || { warn "The timeout command is required for bounded address scanning."; return 1; }
+
+    log "Scanning Reality SNI candidates outward from: $scan_addr (limit: ${SCANNER_MAX_SECONDS}s)"
+    local scan_status=0
+    local scanner_pid
+    timeout --signal=TERM --kill-after=5s "$SCANNER_MAX_SECONDS" \
+      "$scanner_bin" -addr "$scan_addr" -out "$out_csv" -thread "$SCANNER_THREADS" -timeout "$SCANNER_TIMEOUT" \
+      >"$scan_log" 2>&1 &
+    scanner_pid=$!
+    while kill -0 "$scanner_pid" 2>/dev/null; do
+      if [ -s "$out_csv" ] && awk 'NR > 1 { found = 1; exit } END { exit(found ? 0 : 1) }' "$out_csv"; then
+        log "Reality SNI candidate found; stopping the address scan."
+        kill -TERM "$scanner_pid" 2>/dev/null || true
+        break
+      fi
+      sleep 1
+    done
+    wait "$scanner_pid" || scan_status=$?
+    case "$scan_status" in
+      0|124|137|143) ;;
+      *) warn "RealiTLScanner exited with status $scan_status; attempting to use any completed results." ;;
+    esac
   fi
   cat "$scan_log" >&2 || true
 
@@ -930,4 +1061,6 @@ main() {
   log "Production stake requirement is fixed by compose: $PROD_STAKE_ATOMIC atomic XPNT."
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi
