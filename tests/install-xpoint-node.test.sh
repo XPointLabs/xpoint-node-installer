@@ -59,6 +59,19 @@ test_external_fallback() (
   assert_eq '93.184.216.36' "$(detect_node_public_ipv4)" 'HTTPS public-IP fallback'
 )
 
+test_external_ip_precedes_proxied_dns() (
+  source "$INSTALLER"
+  env_get() {
+    case "$1" in
+      DEEP_NODE_PUBLIC_IP) printf '' ;;
+      *) printf 'proxied.example.net' ;;
+    esac
+  }
+  resolve_host_public_ipv4() { printf '104.16.1.1'; }
+  detect_external_public_ipv4() { printf '93.184.216.36'; }
+  assert_eq '93.184.216.36' "$(detect_node_public_ipv4)" 'origin IP precedes proxied DNS'
+)
+
 test_scanner_option_precedence() (
   source "$INSTALLER"
   parse_args --scanner-url https://example.com/targets --scanner-addr 93.184.216.0/24
@@ -147,6 +160,7 @@ test_ipv4_validation
 test_configured_public_ip
 test_resolved_public_host
 test_external_fallback
+test_external_ip_precedes_proxied_dns
 test_scanner_option_precedence
 test_peer_rpc_option
 test_peer_endpoint_configuration

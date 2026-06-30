@@ -635,11 +635,11 @@ detect_node_public_ipv4() {
     printf '%s' "$configured_ip"
     return
   fi
-  if candidate="$(resolve_host_public_ipv4 "$configured_host")"; then
+  if candidate="$(detect_external_public_ipv4)"; then
     printf '%s' "$candidate"
     return
   fi
-  if candidate="$(detect_external_public_ipv4)"; then
+  if candidate="$(resolve_host_public_ipv4 "$configured_host")"; then
     printf '%s' "$candidate"
     return
   fi
