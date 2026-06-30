@@ -32,7 +32,7 @@ DEFAULT_PUSH_NOTIFY_URL="https://push.xpoint.network/_compat/push-notify"
 DEFAULT_ARBITRUM_RPC_URL="https://arb1.arbitrum.io/rpc"
 DEFAULT_XNODE_IMAGE="ghcr.io/xpointlabs/xnode:latest"
 DEFAULT_STORAGE_IMAGE="ghcr.io/xpointlabs/deep-storage-service:latest"
-DEFAULT_REALITY_SNI="www.microsoft.com"
+DEFAULT_REALITY_SNI="cloudflare-dns.com"
 
 COMPOSE_FILE=""
 ENV_FILE=""
@@ -240,9 +240,9 @@ services:
       Vless__ApiIngressHost: 127.0.0.1
       Vless__ApiIngressPort: "8080"
       Vless__ClientId: ${DEEP_NODE_VLESS_CLIENT_ID:?set DEEP_NODE_VLESS_CLIENT_ID}
-      Vless__MaskDomain: ${DEEP_NODE_MASK_DOMAIN:-www.microsoft.com}
+      Vless__MaskDomain: ${DEEP_NODE_MASK_DOMAIN:-cloudflare-dns.com}
       Vless__TransportMode: Reality
-      Vless__Reality__ServerName: ${DEEP_NODE_REALITY_SERVER_NAME:-www.microsoft.com}
+      Vless__Reality__ServerName: ${DEEP_NODE_REALITY_SERVER_NAME:-cloudflare-dns.com}
       Vless__Reality__PublicKey: ${DEEP_NODE_REALITY_PUBLIC_KEY:?set DEEP_NODE_REALITY_PUBLIC_KEY}
       Vless__Reality__PrivateKey: ${DEEP_NODE_REALITY_PRIVATE_KEY:?set DEEP_NODE_REALITY_PRIVATE_KEY}
       Vless__Reality__ShortId: ${DEEP_NODE_REALITY_SHORT_ID:?set DEEP_NODE_REALITY_SHORT_ID}
