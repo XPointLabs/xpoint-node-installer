@@ -126,6 +126,11 @@ rejects replays, and rate-limits the listener. If UFW is already active, the
 installer opens only the selected Reality and peer TCP ports; it never enables
 or changes the firewall's global policy by itself.
 
+The node also derives its BLS quorum signer URL from this signed peer contact.
+There is no operator-configurable signer URL. On production nodes the signer
+route is accepted only from the XPoint staking control-plane address and is
+rate-limited; other sources receive `404`.
+
 ## Reality SNI
 
 Default Reality camouflage:

@@ -16,7 +16,6 @@ REGISTRY_URL_ARG=""
 RPC_URL_ARG=""
 FALLBACK_RPC_URLS_ARG=""
 PEER_RPC_PORT_ARG=""
-SIGNING_ENDPOINT_ARG=""
 XNODE_IMAGE_ARG=""
 STORAGE_IMAGE_ARG=""
 SCANNER_ADDR="${XPOINT_REALITY_SCAN_ADDR:-}"
@@ -58,7 +57,6 @@ Options:
   --rpc-url URL                Arbitrum One RPC URL used by the node backend
   --fallback-rpc-urls URLS     Comma-separated fallback Arbitrum One RPC URLs
   --peer-rpc-port PORT         Public signed node-to-node RPC port (default: 22020)
-  --signing-endpoint URL       Private/control-plane BLS signing endpoint
   --xnode-image IMAGE          XPoint node image
   --storage-image IMAGE        Per-node storage service image
   --default-reality            Use the default Reality SNI
@@ -100,7 +98,6 @@ parse_args() {
       --rpc-url) RPC_URL_ARG="${2:?missing value for --rpc-url}"; shift 2 ;;
       --fallback-rpc-urls) FALLBACK_RPC_URLS_ARG="${2:?missing value for --fallback-rpc-urls}"; shift 2 ;;
       --peer-rpc-port) PEER_RPC_PORT_ARG="${2:?missing value for --peer-rpc-port}"; shift 2 ;;
-      --signing-endpoint) SIGNING_ENDPOINT_ARG="${2:?missing value for --signing-endpoint}"; shift 2 ;;
       --xnode-image) XNODE_IMAGE_ARG="${2:?missing value for --xnode-image}"; shift 2 ;;
       --storage-image) STORAGE_IMAGE_ARG="${2:?missing value for --storage-image}"; shift 2 ;;
       --default-reality) REALITY_MODE="default"; shift ;;
@@ -220,6 +217,7 @@ services:
       Node__PublicPort: ${DEEP_NODE_PUBLIC_PORT:-443}
       Node__PublicPeerRpcPort: ${DEEP_NODE_PEER_RPC_PORT:-22020}
       Node__PublicPeerRpcEndpoint: ${DEEP_NODE_PEER_RPC_ENDPOINT:?set DEEP_NODE_PEER_RPC_ENDPOINT}
+      Node__QuorumCoordinatorNetworks: "111.235.151.150/32"
 
       Runtime__BootstrapFromStorage: ${DEEP_NODE_BOOTSTRAP_FROM_STORAGE:-true}
       Runtime__HeartbeatInterval: ${DEEP_NODE_RUNTIME_HEARTBEAT_INTERVAL:-00:00:30}
@@ -264,7 +262,6 @@ services:
       RegistryRegistration__EthereumRpcUrl: ${DEEP_ARBITRUM_RPC_URL:-https://arb1.arbitrum.io/rpc}
       RegistryRegistration__EthereumFallbackRpcUrls: ${DEEP_ARBITRUM_FALLBACK_RPC_URLS:-https://arb1.arbitrum.io/rpc}
       RegistryRegistration__ServiceNodeRewardsAddress: ${DEEP_SERVICE_NODE_REWARDS_ADDRESS:?set DEEP_SERVICE_NODE_REWARDS_ADDRESS}
-      RegistryRegistration__SigningEndpoint: ${DEEP_NODE_SIGNING_ENDPOINT:?set DEEP_NODE_SIGNING_ENDPOINT}
     ports:
       - "${DEEP_NODE_VLESS_BIND:-443}:${DEEP_NODE_VLESS_CONTAINER_PORT:-443}"
       - "${DEEP_NODE_API_BIND:-127.0.0.1:8080}:8080"
@@ -467,7 +464,6 @@ DEEP_NODE_PEER_RPC_PORT=22020
 DEEP_NODE_PEER_RPC_BIND=22020
 DEEP_NODE_PEER_RPC_ENDPOINT=
 DEEP_NODE_STORAGE_BIND=127.0.0.1:22021
-DEEP_NODE_SIGNING_ENDPOINT=http://127.0.0.1:8080/api/staking/quorum/sign
 DEEP_STORAGE_RPC_URL=http://storage-service:8080
 DEEP_PUSH_NOTIFY_URL=$DEFAULT_PUSH_NOTIFY_URL
 
@@ -757,7 +753,6 @@ configure_env() {
   prompt_env DEEP_REWARDS_ADDRESS "Rewards wallet" "$operator_value" "$REWARDS_ADDRESS_ARG"
   prompt_env DEEP_ARBITRUM_RPC_URL "Arbitrum One RPC URL" "$DEFAULT_ARBITRUM_RPC_URL" "$RPC_URL_ARG"
   prompt_env DEEP_ARBITRUM_FALLBACK_RPC_URLS "Fallback Arbitrum One RPC URLs" "$DEFAULT_ARBITRUM_RPC_URL" "$FALLBACK_RPC_URLS_ARG"
-  prompt_env DEEP_NODE_SIGNING_ENDPOINT "Control-plane BLS signing endpoint" "http://127.0.0.1:8080/api/staking/quorum/sign" "$SIGNING_ENDPOINT_ARG"
 
   env_set DEEP_SERVICE_NODE_REWARDS_ADDRESS "$PROD_SERVICE_NODE_REWARDS"
   env_set DEEP_ARBITRUM_CHAIN_ID "42161"
@@ -1002,7 +997,6 @@ validate_for_start() {
     DEEP_NODE_PUBLIC_IP \
     DEEP_NODE_PEER_RPC_PORT \
     DEEP_NODE_PEER_RPC_ENDPOINT \
-    DEEP_NODE_SIGNING_ENDPOINT \
     DEEP_REGISTRY_URL \
     DEEP_ARBITRUM_RPC_URL \
     DEEP_SERVICE_NODE_REWARDS_ADDRESS \
