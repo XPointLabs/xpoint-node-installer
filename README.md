@@ -170,5 +170,7 @@ docker compose --env-file ./.env.node.prod -f ./docker-compose.node.prod.yml pul
 docker compose --env-file ./.env.node.prod -f ./docker-compose.node.prod.yml up -d
 ```
 
+The installer also mounts the generated Ed25519 node identity into the storage sidecar. Storage-triggered requests to `push.xpoint.network` are signed automatically and are accepted only while the node is active in the XPoint registry; operators do not configure a separate push credential.
+
 Do not run `docker compose down -v` unless you intentionally want to wipe local
 node state and have backed up the identity files.
