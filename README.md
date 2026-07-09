@@ -8,6 +8,7 @@ The installer is idempotent:
 - creates `/opt/xpoint-node`;
 - writes the production compose file;
 - creates `.env.node.prod` only if missing and preserves manual edits;
+- configures Docker `json-file` log rotation (`50m` x `5` by default);
 - generates Ed25519, BLS, VLESS UUID, and Xray Reality keys when missing;
 - detects the node public IPv4 and publishes an Ed25519-authenticated peer endpoint;
 - pulls the configured images and runs `docker compose up -d`;
@@ -16,6 +17,11 @@ The installer is idempotent:
 `DEEP_STAKE_ATOMIC` is intentionally not a node operator setting. The production
 staking requirement is a protocol/contract value and is fixed in the compose
 file as `25,000 XPNT` (`25000000000000` atomic units).
+
+The node also verifies BLS quorum-signing policy against the production staking
+backend before signing reward, exit, or liquidation messages. The default is
+`https://staking-api.xpoint.network`; override it with `--staking-backend-url`
+only when you are intentionally joining another XPoint environment.
 
 ## Quick Start
 
@@ -73,6 +79,23 @@ echo "$GITHUB_TOKEN" | docker login ghcr.io -u USERNAME --password-stdin
 
 If `docker compose pull` fails but both images are already preloaded locally,
 the installer continues with the local images.
+
+## Docker Logs And Disk Use
+
+The installer writes both host-level Docker daemon defaults and compose-level
+logging settings:
+
+```text
+DEEP_DOCKER_LOG_MAX_SIZE=50m
+DEEP_DOCKER_LOG_MAX_FILE=5
+```
+
+Override them with `--docker-log-max-size` and `--docker-log-max-file`.
+
+For existing hosts, `--prune-docker` removes stopped containers, unused images,
+and build cache after the node update. Docker volumes are never pruned, but
+unused rollback images and cached build layers can be removed, so keep any
+rollback tags you need before using it.
 
 ## Public Port
 

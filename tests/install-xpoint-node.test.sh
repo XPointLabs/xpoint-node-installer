@@ -89,6 +89,34 @@ test_peer_rpc_option() (
   assert_eq '32020' "$PEER_RPC_PORT_ARG" 'peer RPC port option'
 )
 
+test_phase1_options() (
+  source "$INSTALLER"
+  parse_args \
+    --staking-backend-url https://staking-api.example.com \
+    --docker-log-max-size 25m \
+    --docker-log-max-file 3 \
+    --prune-docker
+  assert_eq 'https://staking-api.example.com' "$STAKING_BACKEND_URL_ARG" 'staking backend URL option'
+  assert_eq '25m' "$DOCKER_LOG_MAX_SIZE_ARG" 'Docker log max-size option'
+  assert_eq '3' "$DOCKER_LOG_MAX_FILE_ARG" 'Docker log max-file option'
+  assert_eq '1' "$PRUNE_DOCKER" 'Docker prune option'
+)
+
+test_docker_log_option_validation() (
+  source "$INSTALLER"
+  is_docker_log_max_size 50m
+  is_docker_log_max_size 1g
+  is_docker_log_max_size 1048576
+  ! is_docker_log_max_size 0m
+  ! is_docker_log_max_size 50mb
+  ! is_docker_log_max_size invalid
+
+  is_positive_integer 1
+  is_positive_integer 5
+  ! is_positive_integer 0
+  ! is_positive_integer 3x
+)
+
 test_peer_endpoint_configuration() (
   source "$INSTALLER"
   local temp_dir
@@ -110,6 +138,28 @@ ENV
   assert_eq '93.184.216.34' "$(env_get DEEP_NODE_PUBLIC_IP)" 'generated public IP'
   assert_eq 'http://93.184.216.34:22020/api/peer/onion' "$(env_get DEEP_NODE_PEER_RPC_ENDPOINT)" 'generated peer endpoint'
   assert_eq '' "$(env_get DEEP_NODE_RPC_ENDPOINT)" 'legacy RPC endpoint removed'
+  assert_eq 'https://staking-api.xpoint.network' "$(env_get DEEP_STAKING_BACKEND_URL)" 'default staking backend URL'
+  assert_eq 'true' "$(env_get DEEP_ENFORCE_QUORUM_SIGNING_POLICY)" 'quorum policy enforcement default'
+  assert_eq '5' "$(env_get DEEP_QUORUM_POLICY_BACKEND_TIMEOUT_SECONDS)" 'quorum policy timeout default'
+  assert_eq '100000000000000' "$(env_get DEEP_MAX_REWARD_SIGNATURE_INCREASE_ATOMIC)" 'reward signature cap default'
+  assert_eq '300' "$(env_get DEEP_MAX_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS)" 'signature timestamp skew default'
+  assert_eq '50m' "$(env_get DEEP_DOCKER_LOG_MAX_SIZE)" 'Docker log max-size default'
+  assert_eq '5' "$(env_get DEEP_DOCKER_LOG_MAX_FILE)" 'Docker log max-file default'
+)
+
+test_compose_contains_phase1_policy_and_logging() (
+  source "$INSTALLER"
+  local temp_dir
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  APP_DIR="$temp_dir"
+  COMPOSE_FILE="$temp_dir/docker-compose.node.prod.yml"
+  write_compose_file
+
+  grep -q 'max-size: ${DEEP_DOCKER_LOG_MAX_SIZE:-50m}' "$COMPOSE_FILE"
+  grep -q 'max-file: ${DEEP_DOCKER_LOG_MAX_FILE:-5}' "$COMPOSE_FILE"
+  grep -q 'RegistryRegistration__QuorumPolicyBackendBaseUrl: ${DEEP_STAKING_BACKEND_URL:?set DEEP_STAKING_BACKEND_URL}' "$COMPOSE_FILE"
+  grep -q 'RegistryRegistration__EnforceQuorumSigningPolicy: ${DEEP_ENFORCE_QUORUM_SIGNING_POLICY:-true}' "$COMPOSE_FILE"
 )
 
 test_existing_reality_sni_is_preserved() (
@@ -163,7 +213,10 @@ test_external_fallback
 test_external_ip_precedes_proxied_dns
 test_scanner_option_precedence
 test_peer_rpc_option
+test_phase1_options
+test_docker_log_option_validation
 test_peer_endpoint_configuration
+test_compose_contains_phase1_policy_and_logging
 test_existing_reality_sni_is_preserved
 test_bounded_scanner_result
 printf 'PASS: install-xpoint-node tests\n'

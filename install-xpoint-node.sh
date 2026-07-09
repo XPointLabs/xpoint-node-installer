@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.3.0"
+INSTALLER_VERSION="0.4.0"
 APP_DIR="${XPOINT_NODE_DIR:-/opt/xpoint-node}"
 NON_INTERACTIVE=0
 START_NODE=1
 ROTATE_REALITY=0
+PRUNE_DOCKER=0
 REALITY_MODE="${XPOINT_REALITY_MODE:-prompt}"
 
 PUBLIC_HOST_ARG=""
@@ -13,11 +14,14 @@ PUBLIC_PORT_ARG=""
 OPERATOR_ADDRESS_ARG=""
 REWARDS_ADDRESS_ARG=""
 REGISTRY_URL_ARG=""
+STAKING_BACKEND_URL_ARG=""
 RPC_URL_ARG=""
 FALLBACK_RPC_URLS_ARG=""
 PEER_RPC_PORT_ARG=""
 XNODE_IMAGE_ARG=""
 STORAGE_IMAGE_ARG=""
+DOCKER_LOG_MAX_SIZE_ARG=""
+DOCKER_LOG_MAX_FILE_ARG=""
 SCANNER_ADDR="${XPOINT_REALITY_SCAN_ADDR:-}"
 SCANNER_URL="${XPOINT_REALITY_SCAN_URL:-}"
 SCANNER_THREADS="${XPOINT_REALITY_SCAN_THREADS:-16}"
@@ -27,11 +31,17 @@ SCANNER_MAX_SECONDS="${XPOINT_REALITY_SCAN_MAX_SECONDS:-60}"
 PROD_STAKE_ATOMIC="25000000000000"
 PROD_SERVICE_NODE_REWARDS="0xc52284b7aBAebbEF7BdE0E1ca8251B44AeA12F5f"
 DEFAULT_REGISTRY_URL="https://registry.xpoint.network"
+DEFAULT_STAKING_BACKEND_URL="https://staking-api.xpoint.network"
 DEFAULT_PUSH_NOTIFY_URL="https://push.xpoint.network/_compat/push-notify"
 DEFAULT_ARBITRUM_RPC_URL="https://arb1.arbitrum.io/rpc"
 DEFAULT_XNODE_IMAGE="ghcr.io/xpointlabs/xnode:latest"
 DEFAULT_STORAGE_IMAGE="ghcr.io/xpointlabs/deep-storage-service:latest"
 DEFAULT_REALITY_SNI="cloudflare-dns.com"
+DEFAULT_DOCKER_LOG_MAX_SIZE="50m"
+DEFAULT_DOCKER_LOG_MAX_FILE="5"
+DEFAULT_MAX_REWARD_SIGNATURE_INCREASE_ATOMIC="100000000000000"
+DEFAULT_QUORUM_POLICY_TIMEOUT_SECONDS="5"
+DEFAULT_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS="300"
 
 COMPOSE_FILE=""
 ENV_FILE=""
@@ -54,11 +64,16 @@ Options:
   --operator-address ADDRESS   Staking operator wallet
   --rewards-address ADDRESS    Staking rewards wallet
   --registry-url URL           Production registry URL
+  --staking-backend-url URL    Production staking backend API URL
   --rpc-url URL                Arbitrum One RPC URL used by the node backend
   --fallback-rpc-urls URLS     Comma-separated fallback Arbitrum One RPC URLs
   --peer-rpc-port PORT         Public signed node-to-node RPC port (default: 22020)
   --xnode-image IMAGE          XPoint node image
   --storage-image IMAGE        Per-node storage service image
+  --docker-log-max-size SIZE   Docker json-file max-size (default: 50m)
+  --docker-log-max-file COUNT  Docker json-file max-file (default: 5)
+  --prune-docker               Remove stopped containers, unused images, and build cache
+                               after update. Volumes are never pruned.
   --default-reality            Use the default Reality SNI
   --auto-sni                   Select Reality SNI with XTLS/RealiTLScanner
   --scanner-url URL            URL for RealiTLScanner crawl mode (overrides automatic node-IP scan)
@@ -95,11 +110,15 @@ parse_args() {
       --operator-address) OPERATOR_ADDRESS_ARG="${2:?missing value for --operator-address}"; shift 2 ;;
       --rewards-address) REWARDS_ADDRESS_ARG="${2:?missing value for --rewards-address}"; shift 2 ;;
       --registry-url) REGISTRY_URL_ARG="${2:?missing value for --registry-url}"; shift 2 ;;
+      --staking-backend-url) STAKING_BACKEND_URL_ARG="${2:?missing value for --staking-backend-url}"; shift 2 ;;
       --rpc-url) RPC_URL_ARG="${2:?missing value for --rpc-url}"; shift 2 ;;
       --fallback-rpc-urls) FALLBACK_RPC_URLS_ARG="${2:?missing value for --fallback-rpc-urls}"; shift 2 ;;
       --peer-rpc-port) PEER_RPC_PORT_ARG="${2:?missing value for --peer-rpc-port}"; shift 2 ;;
       --xnode-image) XNODE_IMAGE_ARG="${2:?missing value for --xnode-image}"; shift 2 ;;
       --storage-image) STORAGE_IMAGE_ARG="${2:?missing value for --storage-image}"; shift 2 ;;
+      --docker-log-max-size) DOCKER_LOG_MAX_SIZE_ARG="${2:?missing value for --docker-log-max-size}"; shift 2 ;;
+      --docker-log-max-file) DOCKER_LOG_MAX_FILE_ARG="${2:?missing value for --docker-log-max-file}"; shift 2 ;;
+      --prune-docker) PRUNE_DOCKER=1; shift ;;
       --default-reality) REALITY_MODE="default"; shift ;;
       --auto-sni) REALITY_MODE="scan"; shift ;;
       --scanner-url) SCANNER_URL="${2:?missing value for --scanner-url}"; SCANNER_ADDR=""; shift 2 ;;
@@ -140,12 +159,12 @@ require_linux() {
 
 ensure_base_packages() {
   if ! command_exists apt-get; then
-    fail "Only apt-based Linux distributions are automated for now. Install Docker, curl, openssl, git, and nodejs manually, then rerun."
+    fail "Only apt-based Linux distributions are automated for now. Install Docker, curl, openssl, git, nodejs, and python3 manually, then rerun."
   fi
 
   log "Installing base packages if missing"
   run_as_root apt-get update
-  run_as_root apt-get install -y ca-certificates curl gnupg openssl git nodejs
+  run_as_root apt-get install -y ca-certificates curl gnupg openssl git nodejs python3
 }
 
 ensure_docker() {
@@ -154,14 +173,19 @@ ensure_docker() {
   else
     log "Installing Docker Engine and Compose plugin"
     run_as_root install -m 0755 -d /etc/apt/keyrings
+    . /etc/os-release
+    local docker_os="${ID:-ubuntu}"
+    case "$docker_os" in
+      ubuntu|debian) ;;
+      *) fail "Unsupported apt distribution for Docker repository: $docker_os" ;;
+    esac
     if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
-      curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+      curl -fsSL "https://download.docker.com/linux/${docker_os}/gpg" \
         | run_as_root gpg --dearmor -o /etc/apt/keyrings/docker.gpg
       run_as_root chmod a+r /etc/apt/keyrings/docker.gpg
     fi
 
-    . /etc/os-release
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${docker_os} ${VERSION_CODENAME} stable" \
       | run_as_root tee /etc/apt/sources.list.d/docker.list >/dev/null
 
     run_as_root apt-get update
@@ -180,6 +204,69 @@ ensure_docker() {
   fi
 
   "${COMPOSE_CMD[@]}" version >/dev/null
+}
+
+configure_docker_logging() {
+  local log_max_size log_max_file
+  log_max_size="$(env_get DEEP_DOCKER_LOG_MAX_SIZE | grep -E '.+' || printf '%s' "$DEFAULT_DOCKER_LOG_MAX_SIZE")"
+  log_max_file="$(env_get DEEP_DOCKER_LOG_MAX_FILE | grep -E '.+' || printf '%s' "$DEFAULT_DOCKER_LOG_MAX_FILE")"
+  require_docker_log_options "$log_max_size" "$log_max_file"
+
+  if ! command_exists python3; then
+    warn "python3 is unavailable; skipping Docker daemon log rotation merge."
+    return
+  fi
+
+  log "Configuring Docker json-file log rotation (${log_max_size} x ${log_max_file})"
+  run_as_root mkdir -p /etc/docker
+  run_as_root env XPOINT_DOCKER_LOG_MAX_SIZE="$log_max_size" XPOINT_DOCKER_LOG_MAX_FILE="$log_max_file" python3 <<'PY'
+import json
+import os
+import shutil
+import time
+
+path = "/etc/docker/daemon.json"
+data = {}
+
+if os.path.exists(path) and os.path.getsize(path) > 0:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        backup = f"{path}.bak-invalid-{int(time.time())}"
+        shutil.copy2(path, backup)
+        print(f"Existing daemon.json was invalid JSON; backed up to {backup}")
+        data = {}
+
+data["log-driver"] = "json-file"
+log_opts = data.get("log-opts")
+if not isinstance(log_opts, dict):
+    log_opts = {}
+log_opts["max-size"] = os.environ["XPOINT_DOCKER_LOG_MAX_SIZE"]
+log_opts["max-file"] = os.environ["XPOINT_DOCKER_LOG_MAX_FILE"]
+data["log-opts"] = log_opts
+
+tmp = f"{path}.tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+os.replace(tmp, path)
+PY
+
+  if command_exists systemctl; then
+    run_as_root systemctl reload docker >/dev/null 2>&1 \
+      || run_as_root systemctl kill -s HUP docker >/dev/null 2>&1 \
+      || warn "Docker daemon reload failed; compose-level logging still applies to new node containers."
+  fi
+}
+
+prune_docker_if_requested() {
+  [ "$PRUNE_DOCKER" -eq 1 ] || return 0
+
+  warn "--prune-docker removes stopped containers, unused images, and build cache. Docker volumes are not pruned."
+  "${DOCKER_CMD[@]}" container prune -f
+  "${DOCKER_CMD[@]}" image prune -af
+  "${DOCKER_CMD[@]}" builder prune -af
 }
 
 ensure_app_dir() {
@@ -201,6 +288,11 @@ services:
     image: ${XNODE_IMAGE:?set XNODE_IMAGE}
     restart: unless-stopped
     stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: ${DEEP_DOCKER_LOG_MAX_SIZE:-50m}
+        max-file: ${DEEP_DOCKER_LOG_MAX_FILE:-5}
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://0.0.0.0:8080;http://0.0.0.0:8081
@@ -262,6 +354,11 @@ services:
       RegistryRegistration__EthereumRpcUrl: ${DEEP_ARBITRUM_RPC_URL:-https://arb1.arbitrum.io/rpc}
       RegistryRegistration__EthereumFallbackRpcUrls: ${DEEP_ARBITRUM_FALLBACK_RPC_URLS:-https://arb1.arbitrum.io/rpc}
       RegistryRegistration__ServiceNodeRewardsAddress: ${DEEP_SERVICE_NODE_REWARDS_ADDRESS:?set DEEP_SERVICE_NODE_REWARDS_ADDRESS}
+      RegistryRegistration__EnforceQuorumSigningPolicy: ${DEEP_ENFORCE_QUORUM_SIGNING_POLICY:-true}
+      RegistryRegistration__QuorumPolicyBackendBaseUrl: ${DEEP_STAKING_BACKEND_URL:?set DEEP_STAKING_BACKEND_URL}
+      RegistryRegistration__QuorumPolicyBackendTimeoutSeconds: ${DEEP_QUORUM_POLICY_BACKEND_TIMEOUT_SECONDS:-5}
+      RegistryRegistration__MaxRewardSignatureIncreaseAtomic: ${DEEP_MAX_REWARD_SIGNATURE_INCREASE_ATOMIC:-100000000000000}
+      RegistryRegistration__MaxQuorumSignatureTimestampSkewSeconds: ${DEEP_MAX_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS:-300}
     ports:
       - "${DEEP_NODE_VLESS_BIND:-443}:${DEEP_NODE_VLESS_CONTAINER_PORT:-443}"
       - "${DEEP_NODE_API_BIND:-127.0.0.1:8080}:8080"
@@ -284,6 +381,11 @@ services:
   storage-service:
     image: ${DEEP_STORAGE_SERVICE_IMAGE:?set DEEP_STORAGE_SERVICE_IMAGE}
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: ${DEEP_DOCKER_LOG_MAX_SIZE:-50m}
+        max-file: ${DEEP_DOCKER_LOG_MAX_FILE:-5}
     environment:
       PORT: "8080"
       SERVICE_NAME: deep-storage-service
@@ -468,7 +570,15 @@ DEEP_STORAGE_RPC_URL=http://storage-service:8080
 DEEP_PUSH_NOTIFY_URL=$DEFAULT_PUSH_NOTIFY_URL
 
 DEEP_REGISTRY_URL=$DEFAULT_REGISTRY_URL
+DEEP_STAKING_BACKEND_URL=$DEFAULT_STAKING_BACKEND_URL
 DEEP_REGISTRY_HEARTBEAT_INTERVAL=00:00:30
+DEEP_ENFORCE_QUORUM_SIGNING_POLICY=true
+DEEP_QUORUM_POLICY_BACKEND_TIMEOUT_SECONDS=$DEFAULT_QUORUM_POLICY_TIMEOUT_SECONDS
+DEEP_MAX_REWARD_SIGNATURE_INCREASE_ATOMIC=$DEFAULT_MAX_REWARD_SIGNATURE_INCREASE_ATOMIC
+DEEP_MAX_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS=$DEFAULT_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS
+
+DEEP_DOCKER_LOG_MAX_SIZE=$DEFAULT_DOCKER_LOG_MAX_SIZE
+DEEP_DOCKER_LOG_MAX_FILE=$DEFAULT_DOCKER_LOG_MAX_FILE
 
 DEEP_OPERATOR_ADDRESS=0x0000000000000000000000000000000000000000
 DEEP_REWARDS_ADDRESS=0x0000000000000000000000000000000000000000
@@ -705,6 +815,26 @@ is_tcp_port() {
   [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
 }
 
+is_positive_integer() {
+  local value="$1"
+  [[ "$value" =~ ^[1-9][0-9]*$ ]]
+}
+
+is_docker_log_max_size() {
+  local value="$1"
+  [[ "$value" =~ ^[1-9][0-9]*([kKmMgG])?$ ]]
+}
+
+require_docker_log_options() {
+  local max_size="$1"
+  local max_file="$2"
+
+  is_docker_log_max_size "$max_size" \
+    || fail "DEEP_DOCKER_LOG_MAX_SIZE must be a positive Docker json-file size like 50m, 1g, or 1048576."
+  is_positive_integer "$max_file" \
+    || fail "DEEP_DOCKER_LOG_MAX_FILE must be a positive integer."
+}
+
 prompt_port_env() {
   local key="$1"
   local label="$2"
@@ -746,6 +876,7 @@ configure_env() {
   prompt_port_env DEEP_NODE_PUBLIC_PORT "Public VLESS Reality port" "443" "$PUBLIC_PORT_ARG"
   prompt_port_env DEEP_NODE_PEER_RPC_PORT "Public signed node-to-node RPC port" "22020" "$PEER_RPC_PORT_ARG"
   prompt_env DEEP_REGISTRY_URL "Registry API URL" "$DEFAULT_REGISTRY_URL" "$REGISTRY_URL_ARG"
+  prompt_env DEEP_STAKING_BACKEND_URL "Staking backend API URL" "$DEFAULT_STAKING_BACKEND_URL" "$STAKING_BACKEND_URL_ARG"
   prompt_env DEEP_OPERATOR_ADDRESS "Staking operator wallet" "0x0000000000000000000000000000000000000000" "$OPERATOR_ADDRESS_ARG"
 
   local operator_value
@@ -775,6 +906,21 @@ configure_env() {
   env_set DEEP_STORAGE_RPC_URL "$(env_get DEEP_STORAGE_RPC_URL | grep -E '.+' || printf 'http://storage-service:8080')"
   env_set DEEP_PUSH_NOTIFY_URL "$(env_get DEEP_PUSH_NOTIFY_URL | grep -E '.+' || printf '%s' "$DEFAULT_PUSH_NOTIFY_URL")"
   env_set DEEP_REGISTRY_HEARTBEAT_INTERVAL "$(env_get DEEP_REGISTRY_HEARTBEAT_INTERVAL | grep -E '.+' || printf '00:00:30')"
+  env_set DEEP_ENFORCE_QUORUM_SIGNING_POLICY "$(env_get DEEP_ENFORCE_QUORUM_SIGNING_POLICY | grep -E '.+' || printf 'true')"
+  env_set DEEP_QUORUM_POLICY_BACKEND_TIMEOUT_SECONDS "$(env_get DEEP_QUORUM_POLICY_BACKEND_TIMEOUT_SECONDS | grep -E '.+' || printf '%s' "$DEFAULT_QUORUM_POLICY_TIMEOUT_SECONDS")"
+  env_set DEEP_MAX_REWARD_SIGNATURE_INCREASE_ATOMIC "$(env_get DEEP_MAX_REWARD_SIGNATURE_INCREASE_ATOMIC | grep -E '.+' || printf '%s' "$DEFAULT_MAX_REWARD_SIGNATURE_INCREASE_ATOMIC")"
+  env_set DEEP_MAX_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS "$(env_get DEEP_MAX_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS | grep -E '.+' || printf '%s' "$DEFAULT_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS")"
+  if [ -n "$DOCKER_LOG_MAX_SIZE_ARG" ]; then
+    env_set DEEP_DOCKER_LOG_MAX_SIZE "$DOCKER_LOG_MAX_SIZE_ARG"
+  else
+    env_set DEEP_DOCKER_LOG_MAX_SIZE "$(env_get DEEP_DOCKER_LOG_MAX_SIZE | grep -E '.+' || printf '%s' "$DEFAULT_DOCKER_LOG_MAX_SIZE")"
+  fi
+  if [ -n "$DOCKER_LOG_MAX_FILE_ARG" ]; then
+    env_set DEEP_DOCKER_LOG_MAX_FILE "$DOCKER_LOG_MAX_FILE_ARG"
+  else
+    env_set DEEP_DOCKER_LOG_MAX_FILE "$(env_get DEEP_DOCKER_LOG_MAX_FILE | grep -E '.+' || printf '%s' "$DEFAULT_DOCKER_LOG_MAX_FILE")"
+  fi
+  require_docker_log_options "$(env_get DEEP_DOCKER_LOG_MAX_SIZE)" "$(env_get DEEP_DOCKER_LOG_MAX_FILE)"
   env_set DEEP_OPERATOR_FEE_BPS "$(env_get DEEP_OPERATOR_FEE_BPS | grep -E '.+' || printf '0')"
 }
 
@@ -998,6 +1144,7 @@ validate_for_start() {
     DEEP_NODE_PEER_RPC_PORT \
     DEEP_NODE_PEER_RPC_ENDPOINT \
     DEEP_REGISTRY_URL \
+    DEEP_STAKING_BACKEND_URL \
     DEEP_ARBITRUM_RPC_URL \
     DEEP_SERVICE_NODE_REWARDS_ADDRESS \
     DEEP_NODE_ED25519_PUBLIC_KEY \
@@ -1104,10 +1251,12 @@ main() {
   write_identity_generator
   write_env_template_if_missing
   configure_env
+  configure_docker_logging
   generate_identity_if_needed
   ensure_reality_keys
   configure_firewall_if_active
   start_or_update_node
+  prune_docker_if_requested
 
   log "Done. Config: $ENV_FILE"
   log "Production stake requirement is fixed by compose: $PROD_STAKE_ATOMIC atomic XPNT."
