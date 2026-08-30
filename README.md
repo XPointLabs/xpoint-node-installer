@@ -48,6 +48,11 @@ use a separate Ed25519-authenticated endpoint. `--public-host` accepts either a
 DNS name or the server's public IP. The installer determines and publishes the
 origin IPv4 independently, so a proxied DNS record is not used for peer traffic.
 
+The installer provisions the node-side capability only. As of 2026-08-30 the
+current MAUI mailbox client is not yet wired to send its privacy frame through
+this Reality ingress, so installing a node does not by itself provide a usable
+anti-blocking messenger path or an on-prem client profile.
+
 The node files are placed in:
 
 ```text
@@ -121,7 +126,9 @@ DEEP_NODE_VLESS_BIND=8443
 Keep them equal unless a reverse proxy, NAT rule, or cloud load balancer maps a
 different external port to the local Docker bind. The node publishes
 `DEEP_NODE_PUBLIC_HOST:DEEP_NODE_PUBLIC_PORT` in signed relay contacts, and
-clients use that advertised port for onion routing.
+the target masked client transport will use that advertised port. Current MAUI
+mailbox releases still use a separate direct HTTPS entry origin and must not be
+described as consuming this Reality port until the client-binding gate passes.
 
 ## Node-to-node Port
 
