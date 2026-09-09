@@ -9,10 +9,14 @@ The installer is idempotent:
 - writes the production compose file;
 - creates `.env.node.prod` only if missing and preserves manual edits;
 - configures Docker `json-file` log rotation (`50m` x `5` by default);
-- generates Ed25519, BLS, VLESS UUID, and Xray Reality keys when missing;
-- detects the node public IPv4 and publishes an Ed25519-authenticated peer endpoint;
-- pulls the configured images and runs `docker compose up -d`;
-- on repeated runs, pulls newer image tags and updates the running node.
+- preserves or generates independent Ed25519, BLS, X25519, ONION-state,
+  VLESS UUID, and Xray Reality secrets;
+- migrates legacy inline VLESS and Reality private values to mode-`0600` files;
+- generates two locally issued TLS identities whose rotating SPKI pins are the
+  node-to-node trust anchors (a public CA certificate is not required);
+- snapshots config, secrets, and current image identities before every update;
+- pulls the configured images and requires `docker compose up --wait` to pass;
+- automatically restores the snapshot and old image tags when health fails.
 
 `DEEP_STAKE_ATOMIC` is intentionally not a node operator setting. The production
 staking requirement is a protocol/contract value and is fixed in the compose
@@ -31,9 +35,11 @@ On a fresh Ubuntu 22.04/24.04 server:
 git clone https://github.com/XPointLabs/xpoint-node-installer.git
 cd xpoint-node-installer
 sudo ./install-xpoint-node.sh \
-  --public-host 203.0.113.10 \
+  --public-host seed1.example.net \
   --public-port 443 \
-  --peer-rpc-port 22020 \
+  --receive-position Ingress \
+  --peer ROUTER_ID_2,https://seed2.example.net/,CURRENT_SPKI_2,NEXT_SPKI_2 \
+  --peer ROUTER_ID_3,https://seed3.example.net/,CURRENT_SPKI_3,NEXT_SPKI_3 \
   --operator-address 0x0000000000000000000000000000000000000000 \
   --rewards-address 0x0000000000000000000000000000000000000000 \
   --default-reality
@@ -42,11 +48,12 @@ sudo ./install-xpoint-node.sh \
 Use the actual operator and rewards wallet addresses. The example zero address
 will not pass the start validation.
 
-A domain and an operator-managed TLS certificate are not required. Xray Reality
-provides the client-facing encrypted transport, while node-to-node onion hops
-use a separate Ed25519-authenticated endpoint. `--public-host` accepts either a
-DNS name or the server's public IP. The installer determines and publishes the
-origin IPv4 independently, so a proxied DNS record is not used for peer traffic.
+A purchased domain and an operator-managed/public-CA certificate are not
+required. `--public-host` accepts a DNS name or public IP. Xray Reality provides
+the client-facing transport. The same public TCP port is SNI-multiplexed to the
+HTTPS node API, whose locally issued certificate is authenticated by the exact
+current/next SPKI pins carried in signed protocol metadata. Hostname, validity,
+and pin checks remain mandatory; this is not a trust-all TLS mode.
 
 The installer provisions the node-side capability only. As of 2026-08-30 the
 current MAUI mailbox client is not yet wired to send its privacy frame through
@@ -60,6 +67,12 @@ The node files are placed in:
 /opt/xpoint-node/.env.node.prod
 /opt/xpoint-node/secrets/key_ed25519
 /opt/xpoint-node/secrets/key_bls
+/opt/xpoint-node/secrets/key_x25519
+/opt/xpoint-node/secrets/onion-state-protection.key
+/opt/xpoint-node/secrets/vless-client-id
+/opt/xpoint-node/secrets/reality-private-key
+/opt/xpoint-node/secrets/ingress/current.{crt,key,spki-sha256}
+/opt/xpoint-node/secrets/ingress/next.{crt,key,spki-sha256}
 ```
 
 Manual configuration can be changed in `/opt/xpoint-node/.env.node.prod`.
@@ -130,33 +143,18 @@ the target masked client transport will use that advertised port. Current MAUI
 mailbox releases still use a separate direct HTTPS entry origin and must not be
 described as consuming this Reality port until the client-binding gate passes.
 
-## Node-to-node Port
+## Node-to-node topology
 
-The signed peer RPC uses TCP port `22020` by default. It is intentionally
-separate from the Reality listener because it has a different protocol and
-access policy:
+For the three-router production topology, each node receives one role
+(`Ingress`, `Core`, or `Exit`) and exactly two peer descriptions. Each peer
+description binds the peer's Ed25519 router ID, canonical HTTPS origin, and two
+distinct SPKI pins. The node-to-node API and Reality share the public TLS port;
+the installer does not expose a plaintext peer port. Onion payloads remain
+encrypted, outer requests are Ed25519-authenticated, and replay protection is
+durable across restarts. If UFW is active, the installer opens only this
+multiplexed TCP port and does not alter the firewall's global policy.
 
-```bash
-sudo ./install-xpoint-node.sh --peer-rpc-port 32020
-```
-
-The installer generates these values on every run:
-
-```text
-DEEP_NODE_PUBLIC_IP=203.0.113.10
-DEEP_NODE_PEER_RPC_PORT=32020
-DEEP_NODE_PEER_RPC_BIND=32020
-DEEP_NODE_PEER_RPC_ENDPOINT=http://203.0.113.10:32020/api/peer/onion
-```
-
-The endpoint does not carry plaintext messages. Onion payloads remain encrypted,
-and every outer request is signed by the sending node's Ed25519 identity with a
-timestamp and one-time nonce. The receiver verifies current signed membership,
-rejects replays, and rate-limits the listener. If UFW is already active, the
-installer opens only the selected Reality and peer TCP ports; it never enables
-or changes the firewall's global policy by itself.
-
-The node also derives its BLS quorum signer URL from this signed peer contact.
+The node derives its BLS quorum signer URL from this signed peer contact.
 There is no operator-configurable signer URL. On production nodes the signer
 route is accepted only from the XPoint staking control-plane address and is
 rate-limited; other sources receive `404`.
@@ -204,6 +202,12 @@ docker compose --env-file ./.env.node.prod -f ./docker-compose.node.prod.yml log
 docker compose --env-file ./.env.node.prod -f ./docker-compose.node.prod.yml pull
 docker compose --env-file ./.env.node.prod -f ./docker-compose.node.prod.yml up -d
 ```
+
+Pre-update snapshots are stored under `/opt/xpoint-node/backups`. They do not
+copy or overwrite Docker volumes. Keep them and the automatically tagged
+`xpoint-rollback:*` images until the release has passed its observation window.
+Use `--import-dir` only for an empty target installation; it refuses to merge
+ambiguous secret sets.
 
 The installer also mounts the generated Ed25519 node identity into the storage sidecar. Storage-triggered requests to `push.xpoint.network` are signed automatically and are accepted only while the node is active in the XPoint registry; operators do not configure a separate push credential.
 

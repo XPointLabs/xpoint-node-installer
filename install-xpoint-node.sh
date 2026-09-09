@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.4.0"
+INSTALLER_VERSION="0.5.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${XPOINT_NODE_DIR:-/opt/xpoint-node}"
 NON_INTERACTIVE=0
 START_NODE=1
 ROTATE_REALITY=0
 PRUNE_DOCKER=0
 REALITY_MODE="${XPOINT_REALITY_MODE:-prompt}"
+CERTIFICATE_PROFILE="${XPOINT_CERTIFICATE_PROFILE:-pinned-self-issued}"
+RECEIVE_POSITION_ARG=""
+IMPORT_DIR_ARG=""
+PEER_ARGS=()
+ROLLBACK_DIR=""
 
 PUBLIC_HOST_ARG=""
 PUBLIC_PORT_ARG=""
@@ -48,6 +54,8 @@ ENV_FILE=""
 SECRETS_DIR=""
 TOOLS_DIR=""
 IDENTITY_SCRIPT=""
+INGRESS_CONFIG_DIR=""
+RUNTIME_SCRIPTS_DIR=""
 DOCKER_CMD=()
 COMPOSE_CMD=()
 
@@ -68,6 +76,10 @@ Options:
   --rpc-url URL                Arbitrum One RPC URL used by the node backend
   --fallback-rpc-urls URLS     Comma-separated fallback Arbitrum One RPC URLs
   --peer-rpc-port PORT         Public signed node-to-node RPC port (default: 22020)
+  --receive-position ROLE      Onion role: Ingress, Core, or Exit
+  --peer SPEC                  Peer as ROUTER_ID,HTTPS_BASE_URL,CURRENT_PIN,NEXT_PIN
+                               (repeat exactly twice for the three-router topology)
+  --import-dir DIR             Import an existing .env.node.prod and secrets directory
   --xnode-image IMAGE          XPoint node image
   --storage-image IMAGE        Per-node storage service image
   --docker-log-max-size SIZE   Docker json-file max-size (default: 50m)
@@ -114,6 +126,9 @@ parse_args() {
       --rpc-url) RPC_URL_ARG="${2:?missing value for --rpc-url}"; shift 2 ;;
       --fallback-rpc-urls) FALLBACK_RPC_URLS_ARG="${2:?missing value for --fallback-rpc-urls}"; shift 2 ;;
       --peer-rpc-port) PEER_RPC_PORT_ARG="${2:?missing value for --peer-rpc-port}"; shift 2 ;;
+      --receive-position) RECEIVE_POSITION_ARG="${2:?missing value for --receive-position}"; shift 2 ;;
+      --peer) PEER_ARGS+=("${2:?missing value for --peer}"); shift 2 ;;
+      --import-dir) IMPORT_DIR_ARG="${2:?missing value for --import-dir}"; shift 2 ;;
       --xnode-image) XNODE_IMAGE_ARG="${2:?missing value for --xnode-image}"; shift 2 ;;
       --storage-image) STORAGE_IMAGE_ARG="${2:?missing value for --storage-image}"; shift 2 ;;
       --docker-log-max-size) DOCKER_LOG_MAX_SIZE_ARG="${2:?missing value for --docker-log-max-size}"; shift 2 ;;
@@ -139,6 +154,8 @@ parse_args() {
   SECRETS_DIR="$APP_DIR/secrets"
   TOOLS_DIR="$APP_DIR/tools"
   IDENTITY_SCRIPT="$APP_DIR/new-xnode-identity.mjs"
+  INGRESS_CONFIG_DIR="$APP_DIR/config/production-ingress"
+  RUNTIME_SCRIPTS_DIR="$APP_DIR/scripts"
 }
 
 run_as_root() {
@@ -271,154 +288,109 @@ prune_docker_if_requested() {
 
 ensure_app_dir() {
   log "Preparing $APP_DIR"
-  run_as_root mkdir -p "$APP_DIR" "$SECRETS_DIR" "$TOOLS_DIR"
+  run_as_root mkdir -p "$APP_DIR" "$SECRETS_DIR" "$TOOLS_DIR" "$APP_DIR/backups"
   if [ "$(id -u)" -ne 0 ]; then
     run_as_root chown -R "$(id -u):$(id -g)" "$APP_DIR"
   fi
   chmod 700 "$SECRETS_DIR"
 }
 
+import_existing_installation() {
+  [ -n "$IMPORT_DIR_ARG" ] || return 0
+
+  local source_dir
+  source_dir="$(cd "$IMPORT_DIR_ARG" 2>/dev/null && pwd)" \
+    || fail "Import directory does not exist: $IMPORT_DIR_ARG"
+  [ "$source_dir" != "$APP_DIR" ] || fail "--import-dir must not be the installation directory itself."
+  [ -f "$source_dir/.env.node.prod" ] || fail "Import directory is missing .env.node.prod."
+  [ -d "$source_dir/secrets" ] || fail "Import directory is missing secrets/."
+  [ ! -s "$ENV_FILE" ] || fail "Refusing to import over an existing non-empty $ENV_FILE."
+  [ -z "$(find "$SECRETS_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+    || fail "Refusing to import over a non-empty $SECRETS_DIR."
+
+  log "Importing existing node configuration and secrets"
+  install -m 0600 "$source_dir/.env.node.prod" "$ENV_FILE"
+  cp -a "$source_dir/secrets/." "$SECRETS_DIR/"
+  chmod 700 "$SECRETS_DIR"
+  find "$SECRETS_DIR" -type f -exec chmod 600 {} +
+}
+
+create_preupdate_backup() {
+  if [ ! -f "$ENV_FILE" ] && [ ! -f "$COMPOSE_FILE" ] \
+      && [ -z "$(find "$SECRETS_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+    return 0
+  fi
+
+  local stamp backup_root
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  backup_root="$APP_DIR/backups/pre-update-$stamp"
+  mkdir -p "$backup_root"
+  chmod 700 "$backup_root"
+
+  tar --exclude='./backups' -C "$APP_DIR" -czf "$backup_root/config-and-secrets.tar.gz" \
+    .env.node.prod docker-compose.node.prod.yml secrets config scripts 2>/dev/null || true
+  if [ ! -s "$backup_root/config-and-secrets.tar.gz" ]; then
+    rm -f "$backup_root/config-and-secrets.tar.gz"
+    rmdir "$backup_root" 2>/dev/null || true
+    return 0
+  fi
+
+  if [ -f "$COMPOSE_FILE" ] && [ -f "$ENV_FILE" ]; then
+    (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config --images 2>/dev/null || true) \
+      | sort -u >"$backup_root/images.txt"
+    local image image_id safe_name
+    while IFS= read -r image; do
+      [ -n "$image" ] || continue
+      image_id="$("${DOCKER_CMD[@]}" image inspect --format '{{.Id}}' "$image" 2>/dev/null || true)"
+      [ -n "$image_id" ] || continue
+      safe_name="$(printf '%s' "$image" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+      "${DOCKER_CMD[@]}" image tag "$image_id" "xpoint-rollback:${stamp}-${safe_name}"
+      printf '%s\t%s\n' "$image" "xpoint-rollback:${stamp}-${safe_name}" >>"$backup_root/image-tags.tsv"
+    done <"$backup_root/images.txt"
+  fi
+
+  ROLLBACK_DIR="$backup_root"
+  log "Rollback snapshot created at $ROLLBACK_DIR"
+}
+
+restore_preupdate_backup() {
+  [ -n "$ROLLBACK_DIR" ] || return 1
+  [ -s "$ROLLBACK_DIR/config-and-secrets.tar.gz" ] || return 1
+
+  warn "Update health check failed; restoring the pre-update configuration and image tags."
+  if [ -s "$ROLLBACK_DIR/image-tags.tsv" ]; then
+    local original rollback_tag
+    while IFS=$'\t' read -r original rollback_tag; do
+      [ -n "$original" ] && [ -n "$rollback_tag" ] || continue
+      "${DOCKER_CMD[@]}" image tag "$rollback_tag" "$original"
+    done <"$ROLLBACK_DIR/image-tags.tsv"
+  fi
+  rm -rf "$SECRETS_DIR" "$INGRESS_CONFIG_DIR" "$RUNTIME_SCRIPTS_DIR"
+  rm -f "$ENV_FILE" "$COMPOSE_FILE"
+  tar -C "$APP_DIR" -xzf "$ROLLBACK_DIR/config-and-secrets.tar.gz"
+  chmod 700 "$SECRETS_DIR"
+  find "$SECRETS_DIR" -type f -exec chmod 600 {} +
+  (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --wait --remove-orphans)
+}
+
 write_compose_file() {
-  log "Writing production compose file"
-  cat >"$COMPOSE_FILE.tmp" <<'YAML'
-name: xpoint-node-prod
+  INGRESS_CONFIG_DIR="${INGRESS_CONFIG_DIR:-$APP_DIR/config/production-ingress}"
+  RUNTIME_SCRIPTS_DIR="${RUNTIME_SCRIPTS_DIR:-$APP_DIR/scripts}"
+  local compose_asset="$SCRIPT_DIR/assets/docker-compose.node.prod.yml"
+  local preflight_asset="$SCRIPT_DIR/assets/scripts/production-ingress-spki.mjs"
+  local entrypoint_asset="$SCRIPT_DIR/assets/scripts/production-ingress-entrypoint.sh"
+  local haproxy_asset="$SCRIPT_DIR/assets/config/production-ingress/haproxy.cfg.template"
+  for asset in "$compose_asset" "$preflight_asset" "$entrypoint_asset" "$haproxy_asset"; do
+    [ -f "$asset" ] || fail "Installer release asset is missing: $asset"
+  done
 
-services:
-  xnode:
-    image: ${XNODE_IMAGE:?set XNODE_IMAGE}
-    restart: unless-stopped
-    stop_grace_period: 30s
-    logging:
-      driver: json-file
-      options:
-        max-size: ${DEEP_DOCKER_LOG_MAX_SIZE:-50m}
-        max-file: ${DEEP_DOCKER_LOG_MAX_FILE:-5}
-    environment:
-      ASPNETCORE_ENVIRONMENT: Production
-      ASPNETCORE_URLS: http://0.0.0.0:8080;http://0.0.0.0:8081
-
-      Node__ApiListenUrl: http://0.0.0.0:8080
-      Node__PeerRpcListenUrl: http://0.0.0.0:8081
-      Node__DataDirectory: /var/lib/xnode
-      Node__RouterId: ${DEEP_NODE_ED25519_PUBLIC_KEY:?set DEEP_NODE_ED25519_PUBLIC_KEY}
-      Node__Ed25519PrivateKeyPath: /run/secrets/node-ed25519-private-key
-      Node__IsRelay: "true"
-      Node__Network: ${DEEP_NETWORK:-mainnet}
-      Node__PublicHost: ${DEEP_NODE_PUBLIC_HOST:?set DEEP_NODE_PUBLIC_HOST}
-      Node__PublicIp: ${DEEP_NODE_PUBLIC_IP:?set DEEP_NODE_PUBLIC_IP}
-      Node__PublicPort: ${DEEP_NODE_PUBLIC_PORT:-443}
-      Node__PublicPeerRpcPort: ${DEEP_NODE_PEER_RPC_PORT:-22020}
-      Node__PublicPeerRpcEndpoint: ${DEEP_NODE_PEER_RPC_ENDPOINT:?set DEEP_NODE_PEER_RPC_ENDPOINT}
-      Node__QuorumCoordinatorNetworks: "111.235.151.150/32"
-
-      Runtime__BootstrapFromStorage: ${DEEP_NODE_BOOTSTRAP_FROM_STORAGE:-true}
-      Runtime__HeartbeatInterval: ${DEEP_NODE_RUNTIME_HEARTBEAT_INTERVAL:-00:00:30}
-      Runtime__RequireSignedRelayContacts: "true"
-
-      RegistryBootstrap__BaseUrl: ${DEEP_REGISTRY_URL:?set DEEP_REGISTRY_URL}
-      StorageRpc__BaseUrl: ${DEEP_STORAGE_RPC_URL:?set DEEP_STORAGE_RPC_URL}
-
-      Vless__Enabled: "true"
-      Vless__MockProcess: "false"
-      Vless__XrayExecutablePath: /usr/local/bin/xray
-      Vless__GeneratedConfigPath: /etc/xnode/xray.generated.json
-      Vless__WorkingDirectory: /var/lib/xnode/xray
-      Vless__InboundListenHost: 0.0.0.0
-      Vless__InboundListenPort: ${DEEP_NODE_VLESS_CONTAINER_PORT:-443}
-      Vless__PublicHost: ${DEEP_NODE_PUBLIC_HOST:?set DEEP_NODE_PUBLIC_HOST}
-      Vless__PublicPort: ${DEEP_NODE_PUBLIC_PORT:-443}
-      Vless__ApiIngressHost: 127.0.0.1
-      Vless__ApiIngressPort: "8080"
-      Vless__ClientId: ${DEEP_NODE_VLESS_CLIENT_ID:?set DEEP_NODE_VLESS_CLIENT_ID}
-      Vless__MaskDomain: ${DEEP_NODE_MASK_DOMAIN:-cloudflare-dns.com}
-      Vless__TransportMode: Reality
-      Vless__Reality__ServerName: ${DEEP_NODE_REALITY_SERVER_NAME:-cloudflare-dns.com}
-      Vless__Reality__PublicKey: ${DEEP_NODE_REALITY_PUBLIC_KEY:?set DEEP_NODE_REALITY_PUBLIC_KEY}
-      Vless__Reality__PrivateKey: ${DEEP_NODE_REALITY_PRIVATE_KEY:?set DEEP_NODE_REALITY_PRIVATE_KEY}
-      Vless__Reality__ShortId: ${DEEP_NODE_REALITY_SHORT_ID:?set DEEP_NODE_REALITY_SHORT_ID}
-      Vless__Reality__Fingerprint: ${DEEP_NODE_REALITY_FINGERPRINT:-chrome}
-      Vless__Reality__SpiderX: ${DEEP_NODE_REALITY_SPIDER_X:-/}
-
-      RegistryHeartbeat__Enabled: "true"
-      RegistryHeartbeat__Endpoint: ${DEEP_REGISTRY_URL:?set DEEP_REGISTRY_URL}/api/nodes/register
-      RegistryHeartbeat__Interval: ${DEEP_REGISTRY_HEARTBEAT_INTERVAL:-00:00:30}
-
-      RegistryRegistration__OperatorAddress: ${DEEP_OPERATOR_ADDRESS:?set DEEP_OPERATOR_ADDRESS}
-      RegistryRegistration__RewardsAddress: ${DEEP_REWARDS_ADDRESS:?set DEEP_REWARDS_ADDRESS}
-      RegistryRegistration__OperatorFeeBps: ${DEEP_OPERATOR_FEE_BPS:-0}
-      RegistryRegistration__StakeAtomic: "25000000000000"
-      RegistryRegistration__ChainId: ${DEEP_ARBITRUM_CHAIN_ID:-42161}
-      RegistryRegistration__Ed25519PublicKey: ${DEEP_NODE_ED25519_PUBLIC_KEY:?set DEEP_NODE_ED25519_PUBLIC_KEY}
-      RegistryRegistration__Ed25519Signature: ${DEEP_NODE_ED25519_SIGNATURE:-}
-      RegistryRegistration__BlsPrivateKeyPath: /run/secrets/node-bls-private-key
-      RegistryRegistration__EthereumRpcUrl: ${DEEP_ARBITRUM_RPC_URL:-https://arb1.arbitrum.io/rpc}
-      RegistryRegistration__EthereumFallbackRpcUrls: ${DEEP_ARBITRUM_FALLBACK_RPC_URLS:-https://arb1.arbitrum.io/rpc}
-      RegistryRegistration__ServiceNodeRewardsAddress: ${DEEP_SERVICE_NODE_REWARDS_ADDRESS:?set DEEP_SERVICE_NODE_REWARDS_ADDRESS}
-      RegistryRegistration__EnforceQuorumSigningPolicy: ${DEEP_ENFORCE_QUORUM_SIGNING_POLICY:-true}
-      RegistryRegistration__QuorumPolicyBackendBaseUrl: ${DEEP_STAKING_BACKEND_URL:?set DEEP_STAKING_BACKEND_URL}
-      RegistryRegistration__QuorumPolicyBackendTimeoutSeconds: ${DEEP_QUORUM_POLICY_BACKEND_TIMEOUT_SECONDS:-5}
-      RegistryRegistration__MaxRewardSignatureIncreaseAtomic: ${DEEP_MAX_REWARD_SIGNATURE_INCREASE_ATOMIC:-100000000000000}
-      RegistryRegistration__MaxQuorumSignatureTimestampSkewSeconds: ${DEEP_MAX_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS:-300}
-    ports:
-      - "${DEEP_NODE_VLESS_BIND:-443}:${DEEP_NODE_VLESS_CONTAINER_PORT:-443}"
-      - "${DEEP_NODE_API_BIND:-127.0.0.1:8080}:8080"
-      - "${DEEP_NODE_PEER_RPC_BIND:-22020}:8081"
-    volumes:
-      - xnode-state:/var/lib/xnode
-      - xnode-config:/etc/xnode
-    secrets:
-      - source: node-ed25519-private-key
-        target: node-ed25519-private-key
-      - source: node-bls-private-key
-        target: node-bls-private-key
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health/ready >/dev/null"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
-
-  storage-service:
-    image: ${DEEP_STORAGE_SERVICE_IMAGE:?set DEEP_STORAGE_SERVICE_IMAGE}
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options:
-        max-size: ${DEEP_DOCKER_LOG_MAX_SIZE:-50m}
-        max-file: ${DEEP_DOCKER_LOG_MAX_FILE:-5}
-    environment:
-      PORT: "8080"
-      SERVICE_NAME: deep-storage-service
-      COMPAT_STATE_DIR: /var/lib/deep/storage-service
-      PUSH_COMPAT_NOTIFY_URL: ${DEEP_PUSH_NOTIFY_URL:-}
-      PUSH_COMPAT_NOTIFY_NODE_ID: ${DEEP_NODE_ED25519_PUBLIC_KEY:?set DEEP_NODE_ED25519_PUBLIC_KEY}
-      PUSH_COMPAT_NOTIFY_ED25519_PRIVATE_KEY_FILE: /run/secrets/node-ed25519-private-key
-    ports:
-      - "${DEEP_NODE_STORAGE_BIND:-127.0.0.1:22021}:8080"
-    volumes:
-      - node-storage-state:/var/lib/deep/storage-service
-    secrets:
-      - source: node-ed25519-private-key
-        target: node-ed25519-private-key
-    healthcheck:
-      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8080/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 10s
-
-volumes:
-  xnode-state:
-  xnode-config:
-  node-storage-state:
-
-secrets:
-  node-ed25519-private-key:
-    file: ${DEEP_NODE_ED25519_PRIVATE_KEY_FILE:?set DEEP_NODE_ED25519_PRIVATE_KEY_FILE}
-  node-bls-private-key:
-    file: ${DEEP_NODE_BLS_PRIVATE_KEY_FILE:?set DEEP_NODE_BLS_PRIVATE_KEY_FILE}
-YAML
+  log "Installing versioned production compose and ingress assets"
+  mkdir -p "$INGRESS_CONFIG_DIR" "$RUNTIME_SCRIPTS_DIR"
+  install -m 0644 "$compose_asset" "$COMPOSE_FILE.tmp"
   mv "$COMPOSE_FILE.tmp" "$COMPOSE_FILE"
+  install -m 0644 "$preflight_asset" "$RUNTIME_SCRIPTS_DIR/production-ingress-spki.mjs"
+  install -m 0755 "$entrypoint_asset" "$RUNTIME_SCRIPTS_DIR/production-ingress-entrypoint.sh"
+  install -m 0644 "$haproxy_asset" "$INGRESS_CONFIG_DIR/haproxy.cfg.template"
 }
 
 write_identity_generator() {
@@ -517,21 +489,38 @@ mkdirSync(directory, { recursive: true, mode: 0o700 });
 
 const ed25519Path = resolve(directory, 'key_ed25519');
 const blsPath = resolve(directory, 'key_bls');
+const x25519Path = resolve(directory, 'key_x25519');
+const vlessClientIdPath = resolve(directory, 'vless-client-id');
 const ed25519PrivateKey = existsSync(ed25519Path)
   ? normalizeHex(readFileSync(ed25519Path, 'utf8'), 'key_ed25519')
   : newEd25519SeedHex();
 const blsPrivateKey = existsSync(blsPath)
   ? normalizeHex(readFileSync(blsPath, 'utf8'), 'key_bls')
   : newBlsScalarHex();
+const x25519PrivateKey = existsSync(x25519Path)
+  ? normalizeHex(readFileSync(x25519Path, 'utf8'), 'key_x25519')
+  : randomBytes(32).toString('hex');
+if (x25519PrivateKey === ed25519PrivateKey || /^0+$/.test(x25519PrivateKey)) {
+  throw new Error('key_x25519 must be nonzero and independent from key_ed25519.');
+}
+const vlessClientId = existsSync(vlessClientIdPath)
+  ? readFileSync(vlessClientIdPath, 'utf8').trim().toLowerCase()
+  : newUuidV4();
+if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(vlessClientId)) {
+  throw new Error('vless-client-id must contain a canonical UUIDv4.');
+}
 
 writeFileSync(ed25519Path, `0x${ed25519PrivateKey}\n`, { mode: 0o600 });
 writeFileSync(blsPath, `0x${blsPrivateKey}\n`, { mode: 0o600 });
+writeFileSync(x25519Path, `${x25519PrivateKey}\n`, { mode: 0o600 });
+writeFileSync(vlessClientIdPath, `${vlessClientId}\n`, { mode: 0o600 });
 
 const output = {
   DEEP_NODE_ED25519_PUBLIC_KEY: ed25519PublicFromSeed(ed25519PrivateKey),
   DEEP_NODE_ED25519_PRIVATE_KEY_FILE: './secrets/key_ed25519',
   DEEP_NODE_BLS_PRIVATE_KEY_FILE: './secrets/key_bls',
-  DEEP_NODE_VLESS_CLIENT_ID: newUuidV4()
+  DEEP_NODE_X25519_PRIVATE_KEY_FILE: './secrets/key_x25519',
+  DEEP_NODE_VLESS_CLIENT_ID_FILE: './secrets/vless-client-id'
 };
 
 if (args.has('--as-env') || args.has('-asenv')) {
@@ -551,59 +540,10 @@ write_env_template_if_missing() {
     return
   fi
 
+  local environment_asset="$SCRIPT_DIR/assets/.env.node.prod.example"
+  [ -f "$environment_asset" ] || fail "Installer environment asset is missing."
   log "Creating $ENV_FILE"
-  cat >"$ENV_FILE" <<ENV
-XNODE_IMAGE=$DEFAULT_XNODE_IMAGE
-DEEP_STORAGE_SERVICE_IMAGE=$DEFAULT_STORAGE_IMAGE
-DEEP_NETWORK=mainnet
-
-DEEP_NODE_PUBLIC_HOST=
-DEEP_NODE_PUBLIC_IP=
-DEEP_NODE_PUBLIC_PORT=443
-DEEP_NODE_VLESS_BIND=443
-DEEP_NODE_API_BIND=127.0.0.1:8080
-DEEP_NODE_PEER_RPC_PORT=22020
-DEEP_NODE_PEER_RPC_BIND=22020
-DEEP_NODE_PEER_RPC_ENDPOINT=
-DEEP_NODE_STORAGE_BIND=127.0.0.1:22021
-DEEP_STORAGE_RPC_URL=http://storage-service:8080
-DEEP_PUSH_NOTIFY_URL=$DEFAULT_PUSH_NOTIFY_URL
-
-DEEP_REGISTRY_URL=$DEFAULT_REGISTRY_URL
-DEEP_STAKING_BACKEND_URL=$DEFAULT_STAKING_BACKEND_URL
-DEEP_REGISTRY_HEARTBEAT_INTERVAL=00:00:30
-DEEP_ENFORCE_QUORUM_SIGNING_POLICY=true
-DEEP_QUORUM_POLICY_BACKEND_TIMEOUT_SECONDS=$DEFAULT_QUORUM_POLICY_TIMEOUT_SECONDS
-DEEP_MAX_REWARD_SIGNATURE_INCREASE_ATOMIC=$DEFAULT_MAX_REWARD_SIGNATURE_INCREASE_ATOMIC
-DEEP_MAX_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS=$DEFAULT_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS
-
-DEEP_DOCKER_LOG_MAX_SIZE=$DEFAULT_DOCKER_LOG_MAX_SIZE
-DEEP_DOCKER_LOG_MAX_FILE=$DEFAULT_DOCKER_LOG_MAX_FILE
-
-DEEP_OPERATOR_ADDRESS=0x0000000000000000000000000000000000000000
-DEEP_REWARDS_ADDRESS=0x0000000000000000000000000000000000000000
-DEEP_OPERATOR_FEE_BPS=0
-
-DEEP_ARBITRUM_RPC_URL=$DEFAULT_ARBITRUM_RPC_URL
-DEEP_ARBITRUM_FALLBACK_RPC_URLS=$DEFAULT_ARBITRUM_RPC_URL
-DEEP_ARBITRUM_CHAIN_ID=42161
-DEEP_SERVICE_NODE_REWARDS_ADDRESS=$PROD_SERVICE_NODE_REWARDS
-
-DEEP_NODE_ED25519_PUBLIC_KEY=
-DEEP_NODE_ED25519_PRIVATE_KEY_FILE=./secrets/key_ed25519
-DEEP_NODE_ED25519_SIGNATURE=
-DEEP_NODE_BLS_PRIVATE_KEY_FILE=./secrets/key_bls
-
-DEEP_NODE_VLESS_CLIENT_ID=
-DEEP_NODE_MASK_DOMAIN=$DEFAULT_REALITY_SNI
-DEEP_NODE_REALITY_SERVER_NAME=$DEFAULT_REALITY_SNI
-DEEP_NODE_REALITY_PUBLIC_KEY=
-DEEP_NODE_REALITY_PRIVATE_KEY=
-DEEP_NODE_REALITY_SHORT_ID=
-DEEP_NODE_REALITY_FINGERPRINT=chrome
-DEEP_NODE_REALITY_SPIDER_X=/
-ENV
-  chmod 600 "$ENV_FILE"
+  install -m 0600 "$environment_asset" "$ENV_FILE"
 }
 
 env_get() {
@@ -835,6 +775,45 @@ require_docker_log_options() {
     || fail "DEEP_DOCKER_LOG_MAX_FILE must be a positive integer."
 }
 
+is_canonical_hex32() {
+  [[ "$1" =~ ^[0-9a-f]{64}$ ]] && ! [[ "$1" =~ ^0{64}$ ]]
+}
+
+configure_topology() {
+  local receive_position current
+  receive_position="$RECEIVE_POSITION_ARG"
+  if [ -z "$receive_position" ]; then
+    receive_position="$(env_get DEEP_NODE_ONION_RECEIVE_POSITION)"
+  fi
+  case "$receive_position" in
+    Ingress|Core|Exit) env_set DEEP_NODE_ONION_RECEIVE_POSITION "$receive_position" ;;
+    "") ;;
+    *) fail "--receive-position must be Ingress, Core, or Exit." ;;
+  esac
+
+  [ "${#PEER_ARGS[@]}" -eq 0 ] || [ "${#PEER_ARGS[@]}" -eq 2 ] \
+    || fail "Specify --peer exactly twice for the three-router production topology."
+  local index=1 spec router_id base_url current_pin next_pin extra
+  for spec in "${PEER_ARGS[@]}"; do
+    IFS=, read -r router_id base_url current_pin next_pin extra <<<"$spec"
+    [ -z "${extra:-}" ] && is_canonical_hex32 "$router_id" \
+      || fail "Peer $index router ID must be canonical lowercase 32-byte hex."
+    [[ "$base_url" =~ ^https://[^/?#]+/$ ]] \
+      || fail "Peer $index base URL must be a canonical HTTPS origin ending in /."
+    is_canonical_hex32 "$current_pin" \
+      || fail "Peer $index current SPKI pin must be canonical lowercase SHA-256 hex."
+    is_canonical_hex32 "$next_pin" \
+      || fail "Peer $index next SPKI pin must be canonical lowercase SHA-256 hex."
+    [ "$current_pin" != "$next_pin" ] \
+      || fail "Peer $index current and next SPKI pins must be distinct."
+    env_set "DEEP_PRIVACY_PEER_${index}_ROUTER_ID" "$router_id"
+    env_set "DEEP_PRIVACY_PEER_${index}_BASE_URL" "$base_url"
+    env_set "DEEP_PRIVACY_PEER_${index}_CURRENT_SPKI_SHA256" "$current_pin"
+    env_set "DEEP_PRIVACY_PEER_${index}_NEXT_SPKI_SHA256" "$next_pin"
+    index=$((index + 1))
+  done
+}
+
 prompt_port_env() {
   local key="$1"
   local label="$2"
@@ -888,6 +867,10 @@ configure_env() {
   env_set DEEP_SERVICE_NODE_REWARDS_ADDRESS "$PROD_SERVICE_NODE_REWARDS"
   env_set DEEP_ARBITRUM_CHAIN_ID "42161"
   env_set DEEP_NETWORK "mainnet"
+  env_set DEEP_INGRESS_CERTIFICATE_PROFILE "$CERTIFICATE_PROFILE"
+  env_set DEEP_INGRESS_HOST "$(env_get DEEP_NODE_PUBLIC_HOST)"
+  env_set DEEP_INGRESS_HTTPS_BIND "$(env_get DEEP_NODE_PUBLIC_PORT)"
+  env_set DEEP_QUORUM_COORDINATOR_CIDR "$(env_get DEEP_QUORUM_COORDINATOR_CIDR | grep -E '.+' || printf '111.235.151.150/32')"
   env_unset DEEP_NODE_RPC_ENDPOINT
   if ! public_ipv4="$(detect_node_public_ipv4)"; then
     fail "Could not determine this node's public IPv4. Set DEEP_NODE_PUBLIC_IP in $ENV_FILE and rerun the installer."
@@ -922,6 +905,7 @@ configure_env() {
   fi
   require_docker_log_options "$(env_get DEEP_DOCKER_LOG_MAX_SIZE)" "$(env_get DEEP_DOCKER_LOG_MAX_FILE)"
   env_set DEEP_OPERATOR_FEE_BPS "$(env_get DEEP_OPERATOR_FEE_BPS | grep -E '.+' || printf '0')"
+  configure_topology
 }
 
 parse_identity_output() {
@@ -930,22 +914,76 @@ parse_identity_output() {
   printf '%s\n' "$output" | grep -E "^${key}=" | tail -n 1 | cut -d= -f2-
 }
 
+write_secret_text() {
+  local path="$1"
+  local value="$2"
+  umask 077
+  printf '%s\n' "$value" >"$path.tmp.$$"
+  mv "$path.tmp.$$" "$path"
+  chmod 600 "$path"
+}
+
+migrate_inline_transport_secrets() {
+  local inline_vless inline_reality file_value
+  local vless_path="$SECRETS_DIR/vless-client-id"
+  local reality_path="$SECRETS_DIR/reality-private-key"
+  inline_vless="$(env_get DEEP_NODE_VLESS_CLIENT_ID)"
+  inline_reality="$(env_get DEEP_NODE_REALITY_PRIVATE_KEY)"
+
+  if [ -n "$inline_vless" ] && ! is_placeholder "$inline_vless"; then
+    [[ "${inline_vless,,}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+      || fail "Legacy DEEP_NODE_VLESS_CLIENT_ID is not a canonical UUIDv4."
+    if [ -f "$vless_path" ]; then
+      file_value="$(tr -d '\r\n' <"$vless_path")"
+      [ "${file_value,,}" = "${inline_vless,,}" ] \
+        || fail "Inline and file-backed VLESS client IDs differ; refusing an ambiguous migration."
+    else
+      write_secret_text "$vless_path" "${inline_vless,,}"
+    fi
+    env_unset DEEP_NODE_VLESS_CLIENT_ID
+  fi
+
+  if [ -n "$inline_reality" ] && ! is_placeholder "$inline_reality"; then
+    [[ "$inline_reality" =~ ^[A-Za-z0-9_-]{43}$ ]] \
+      || fail "Legacy DEEP_NODE_REALITY_PRIVATE_KEY is not a canonical Xray X25519 key."
+    if [ -f "$reality_path" ]; then
+      file_value="$(tr -d '\r\n' <"$reality_path")"
+      [ "$file_value" = "$inline_reality" ] \
+        || fail "Inline and file-backed Reality private keys differ; refusing an ambiguous migration."
+    else
+      write_secret_text "$reality_path" "$inline_reality"
+    fi
+    env_unset DEEP_NODE_REALITY_PRIVATE_KEY
+  fi
+
+  env_set DEEP_NODE_VLESS_CLIENT_ID_FILE "./secrets/vless-client-id"
+  env_set DEEP_NODE_REALITY_PRIVATE_KEY_FILE "./secrets/reality-private-key"
+}
+
 generate_identity_if_needed() {
-  log "Ensuring node Ed25519/BLS identity"
+  log "Ensuring independent Ed25519, BLS, X25519, VLESS, and ONION secrets"
   local output
   output="$(node "$IDENTITY_SCRIPT" --as-env --out-dir "$SECRETS_DIR")"
   printf '%s\n' "$output" >"$APP_DIR/identity.generated.env"
-  chmod 600 "$APP_DIR/identity.generated.env" "$SECRETS_DIR/key_ed25519" "$SECRETS_DIR/key_bls"
+  chmod 600 "$APP_DIR/identity.generated.env" "$SECRETS_DIR/key_ed25519" "$SECRETS_DIR/key_bls" \
+    "$SECRETS_DIR/key_x25519" "$SECRETS_DIR/vless-client-id"
 
   env_set DEEP_NODE_ED25519_PUBLIC_KEY "$(parse_identity_output "$output" DEEP_NODE_ED25519_PUBLIC_KEY)"
   env_set DEEP_NODE_ED25519_PRIVATE_KEY_FILE "./secrets/key_ed25519"
   env_set DEEP_NODE_BLS_PRIVATE_KEY_FILE "./secrets/key_bls"
+  env_set DEEP_NODE_X25519_PRIVATE_KEY_FILE "./secrets/key_x25519"
+  env_set DEEP_NODE_VLESS_CLIENT_ID_FILE "./secrets/vless-client-id"
 
-  local current_vless
-  current_vless="$(env_get DEEP_NODE_VLESS_CLIENT_ID)"
-  if is_placeholder "$current_vless"; then
-    env_set DEEP_NODE_VLESS_CLIENT_ID "$(parse_identity_output "$output" DEEP_NODE_VLESS_CLIENT_ID)"
+  local onion_path="$SECRETS_DIR/onion-state-protection.key"
+  if [ ! -e "$onion_path" ]; then
+    umask 077
+    openssl rand 32 >"$onion_path"
   fi
+  [ -f "$onion_path" ] || fail "ONION state-protection secret is not a regular file."
+  [ "$(wc -c <"$onion_path" | tr -d ' ')" = "32" ] \
+    || fail "ONION state-protection secret must contain exactly 32 raw bytes."
+  chmod 600 "$onion_path"
+  env_set DEEP_NODE_ONION_STATE_PROTECTION_FILE "./secrets/onion-state-protection.key"
 }
 
 choose_reality_mode_if_needed() {
@@ -1079,12 +1117,19 @@ scan_reality_sni() {
 ensure_reality_keys() {
   choose_reality_mode_if_needed
 
-  local current_private current_public current_short
-  current_private="$(env_get DEEP_NODE_REALITY_PRIVATE_KEY)"
+  local current_private current_public current_short private_path
+  private_path="$SECRETS_DIR/reality-private-key"
+  current_private=""
+  [ ! -f "$private_path" ] || current_private="$(tr -d '\r\n' <"$private_path")"
   current_public="$(env_get DEEP_NODE_REALITY_PUBLIC_KEY)"
   current_short="$(env_get DEEP_NODE_REALITY_SHORT_ID)"
 
-  if [ "$ROTATE_REALITY" -eq 1 ] || is_placeholder "$current_private" || is_placeholder "$current_public" || is_placeholder "$current_short"; then
+  if [ "$ROTATE_REALITY" -ne 1 ] && { [ -n "$current_private" ] || ! is_placeholder "$current_public" || ! is_placeholder "$current_short"; } \
+      && { [ -z "$current_private" ] || is_placeholder "$current_public" || is_placeholder "$current_short"; }; then
+    fail "Reality key material is partial. Restore the missing values or use --rotate-reality explicitly."
+  fi
+
+  if [ "$ROTATE_REALITY" -eq 1 ] || [ -z "$current_private" ]; then
     local image output private_key public_key short_id
     image="$(env_get XNODE_IMAGE)"
     log "Generating Xray Reality key pair with $image"
@@ -1099,10 +1144,16 @@ ensure_reality_keys() {
     [ -n "$private_key" ] || fail "Could not parse Reality private key from xray output."
     [ -n "$public_key" ] || fail "Could not parse Reality public key from xray output."
 
-    env_set DEEP_NODE_REALITY_PRIVATE_KEY "$private_key"
+    [[ "$private_key" =~ ^[A-Za-z0-9_-]{43}$ ]] || fail "Generated Reality private key has an unexpected format."
+    [[ "$public_key" =~ ^[A-Za-z0-9_-]{43}$ ]] || fail "Generated Reality public key has an unexpected format."
+    write_secret_text "$private_path" "$private_key"
     env_set DEEP_NODE_REALITY_PUBLIC_KEY "$public_key"
     env_set DEEP_NODE_REALITY_SHORT_ID "$short_id"
   fi
+
+  chmod 600 "$private_path"
+  env_set DEEP_NODE_REALITY_PRIVATE_KEY_FILE "./secrets/reality-private-key"
+  env_unset DEEP_NODE_REALITY_PRIVATE_KEY
 
   local current_sni selected_sni
   current_sni="$(env_get DEEP_NODE_REALITY_SERVER_NAME)"
@@ -1127,6 +1178,73 @@ ensure_reality_keys() {
   env_set DEEP_NODE_REALITY_SPIDER_X "$(env_get DEEP_NODE_REALITY_SPIDER_X | grep -E '.+' || printf '/')"
 }
 
+certificate_spki_sha256() {
+  openssl x509 -in "$1" -pubkey -noout \
+    | openssl pkey -pubin -outform DER 2>/dev/null \
+    | sha256sum | awk '{print $1}'
+}
+
+generate_self_issued_certificate() {
+  local name="$1"
+  local host="$2"
+  local cert_path="$SECRETS_DIR/ingress/${name}.crt"
+  local key_path="$SECRETS_DIR/ingress/${name}.key"
+  local pin_path="$SECRETS_DIR/ingress/${name}.spki-sha256"
+  local san_type="DNS"
+  is_ipv4 "$host" && san_type="IP"
+
+  local existing=0
+  [ -e "$cert_path" ] && existing=$((existing + 1))
+  [ -e "$key_path" ] && existing=$((existing + 1))
+  [ -e "$pin_path" ] && existing=$((existing + 1))
+  [ "$existing" -eq 0 ] || [ "$existing" -eq 3 ] \
+    || fail "Ingress $name certificate set is partial; restore or remove the whole set."
+
+  if [ "$existing" -eq 0 ]; then
+    log "Generating $name pinned self-issued ingress certificate"
+    umask 077
+    env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -sha256 -nodes \
+      -days 825 -subj "/CN=$host" -addext "subjectAltName=${san_type}:$host" \
+      -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+      -addext "extendedKeyUsage=serverAuth" \
+      -keyout "$key_path" -out "$cert_path" >/dev/null 2>&1
+    write_secret_text "$pin_path" "$(certificate_spki_sha256 "$cert_path")"
+  fi
+
+  openssl x509 -in "$cert_path" -noout -checkend 86400 >/dev/null \
+    || fail "Ingress $name certificate is invalid or expires within 24 hours."
+  if is_ipv4 "$host"; then
+    openssl x509 -in "$cert_path" -noout -checkip "$host" >/dev/null \
+      || fail "Ingress $name certificate does not cover $host."
+  else
+    openssl x509 -in "$cert_path" -noout -checkhost "$host" >/dev/null \
+      || fail "Ingress $name certificate does not cover $host."
+  fi
+  [ "$(tr -d '\r\n' <"$pin_path")" = "$(certificate_spki_sha256 "$cert_path")" ] \
+    || fail "Ingress $name SPKI pin does not match its certificate."
+  chmod 600 "$key_path" "$cert_path" "$pin_path"
+}
+
+ensure_ingress_certificates() {
+  local host
+  host="$(env_get DEEP_INGRESS_HOST)"
+  [ "$CERTIFICATE_PROFILE" = "pinned-self-issued" ] \
+    || fail "The public installer currently supports only the pinned-self-issued certificate profile."
+  mkdir -p "$SECRETS_DIR/ingress"
+  chmod 700 "$SECRETS_DIR/ingress"
+  generate_self_issued_certificate current "$host"
+  generate_self_issued_certificate next "$host"
+  [ "$(tr -d '\r\n' <"$SECRETS_DIR/ingress/current.spki-sha256")" \
+    != "$(tr -d '\r\n' <"$SECRETS_DIR/ingress/next.spki-sha256")" ] \
+    || fail "Ingress current and next certificates must use distinct keys."
+  env_set DEEP_INGRESS_CURRENT_CERT_FILE "./secrets/ingress/current.crt"
+  env_set DEEP_INGRESS_CURRENT_KEY_FILE "./secrets/ingress/current.key"
+  env_set DEEP_INGRESS_CURRENT_SPKI_FILE "./secrets/ingress/current.spki-sha256"
+  env_set DEEP_INGRESS_NEXT_CERT_FILE "./secrets/ingress/next.crt"
+  env_set DEEP_INGRESS_NEXT_KEY_FILE "./secrets/ingress/next.key"
+  env_set DEEP_INGRESS_NEXT_SPKI_FILE "./secrets/ingress/next.spki-sha256"
+}
+
 validate_address() {
   local value="$1"
   [[ "$value" =~ ^0x[0-9a-fA-F]{40}$ ]] || return 1
@@ -1147,13 +1265,24 @@ validate_for_start() {
     DEEP_STAKING_BACKEND_URL \
     DEEP_ARBITRUM_RPC_URL \
     DEEP_SERVICE_NODE_REWARDS_ADDRESS \
+    DEEP_INGRESS_CERTIFICATE_PROFILE \
+    DEEP_INGRESS_HOST \
+    DEEP_INGRESS_CURRENT_CERT_FILE \
+    DEEP_INGRESS_CURRENT_KEY_FILE \
+    DEEP_INGRESS_CURRENT_SPKI_FILE \
+    DEEP_INGRESS_NEXT_CERT_FILE \
+    DEEP_INGRESS_NEXT_KEY_FILE \
+    DEEP_INGRESS_NEXT_SPKI_FILE \
     DEEP_NODE_ED25519_PUBLIC_KEY \
     DEEP_NODE_ED25519_PRIVATE_KEY_FILE \
+    DEEP_NODE_X25519_PRIVATE_KEY_FILE \
+    DEEP_NODE_ONION_STATE_PROTECTION_FILE \
+    DEEP_NODE_ONION_RECEIVE_POSITION \
     DEEP_NODE_BLS_PRIVATE_KEY_FILE \
-    DEEP_NODE_VLESS_CLIENT_ID \
+    DEEP_NODE_VLESS_CLIENT_ID_FILE \
     DEEP_NODE_REALITY_SERVER_NAME \
     DEEP_NODE_REALITY_PUBLIC_KEY \
-    DEEP_NODE_REALITY_PRIVATE_KEY \
+    DEEP_NODE_REALITY_PRIVATE_KEY_FILE \
     DEEP_NODE_REALITY_SHORT_ID; do
     value="$(env_get "$key")"
     if is_placeholder "$value"; then
@@ -1174,6 +1303,21 @@ validate_for_start() {
   if [ ! -f "$SECRETS_DIR/key_bls" ]; then
     missing+=("secrets/key_bls")
   fi
+  for key in \
+    DEEP_PRIVACY_PEER_1_ROUTER_ID DEEP_PRIVACY_PEER_1_BASE_URL \
+    DEEP_PRIVACY_PEER_1_CURRENT_SPKI_SHA256 DEEP_PRIVACY_PEER_1_NEXT_SPKI_SHA256 \
+    DEEP_PRIVACY_PEER_2_ROUTER_ID DEEP_PRIVACY_PEER_2_BASE_URL \
+    DEEP_PRIVACY_PEER_2_CURRENT_SPKI_SHA256 DEEP_PRIVACY_PEER_2_NEXT_SPKI_SHA256; do
+    value="$(env_get "$key")"
+    if is_placeholder "$value"; then
+      missing+=("$key")
+    fi
+  done
+  for value in key_x25519 onion-state-protection.key vless-client-id reality-private-key \
+    ingress/current.crt ingress/current.key ingress/current.spki-sha256 \
+    ingress/next.crt ingress/next.key ingress/next.spki-sha256; do
+    [ -f "$SECRETS_DIR/$value" ] || missing+=("secrets/$value")
+  done
 
   if [ "${#missing[@]}" -gt 0 ]; then
     printf '[xpoint-node] The node was prepared, but start was blocked because these values are missing or placeholder:\n' >&2
@@ -1193,6 +1337,14 @@ validate_for_start() {
   [ "$public_port" != "$peer_port" ] || fail "Reality and node-to-node RPC must use different public ports."
   [ "$peer_endpoint" = "http://${public_ip}:${peer_port}/api/peer/onion" ] || \
     fail "DEEP_NODE_PEER_RPC_ENDPOINT must match the generated public IP and peer port."
+  case "$(env_get DEEP_NODE_ONION_RECEIVE_POSITION)" in
+    Ingress|Core|Exit) ;;
+    *) fail "DEEP_NODE_ONION_RECEIVE_POSITION must be Ingress, Core, or Exit." ;;
+  esac
+  [ -z "$(env_get DEEP_NODE_VLESS_CLIENT_ID)" ] \
+    || fail "Inline DEEP_NODE_VLESS_CLIENT_ID must be migrated to a secret file."
+  [ -z "$(env_get DEEP_NODE_REALITY_PRIVATE_KEY)" ] \
+    || fail "Inline DEEP_NODE_REALITY_PRIVATE_KEY must be migrated to a secret file."
 }
 
 configure_firewall_if_active() {
@@ -1201,12 +1353,10 @@ configure_firewall_if_active() {
     return 0
   fi
 
-  local reality_port peer_port
+  local reality_port
   reality_port="$(env_get DEEP_NODE_PUBLIC_PORT)"
-  peer_port="$(env_get DEEP_NODE_PEER_RPC_PORT)"
-  log "Allowing XPoint transport ports in active UFW"
+  log "Allowing the XPoint TLS/Reality multiplexed port in active UFW"
   run_as_root ufw allow "${reality_port}/tcp" comment 'XPoint Reality transport' >/dev/null
-  run_as_root ufw allow "${peer_port}/tcp" comment 'XPoint signed peer RPC' >/dev/null
 }
 
 local_image_exists() {
@@ -1237,7 +1387,12 @@ start_or_update_node() {
   fi
 
   log "Starting or updating node"
-  (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d)
+  if ! (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --wait --wait-timeout 180); then
+    if restore_preupdate_backup; then
+      fail "The update failed its health gate and the previous node release was restored."
+    fi
+    fail "The node failed its health gate. No previous installation was available for automatic rollback."
+  fi
   (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps)
 }
 
@@ -1247,13 +1402,17 @@ main() {
   ensure_base_packages
   ensure_docker
   ensure_app_dir
+  import_existing_installation
+  create_preupdate_backup
   write_compose_file
   write_identity_generator
   write_env_template_if_missing
   configure_env
   configure_docker_logging
+  migrate_inline_transport_secrets
   generate_identity_if_needed
   ensure_reality_keys
+  ensure_ingress_certificates
   configure_firewall_if_active
   start_or_update_node
   prune_docker_if_requested

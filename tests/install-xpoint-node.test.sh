@@ -102,6 +102,92 @@ test_phase1_options() (
   assert_eq '1' "$PRUNE_DOCKER" 'Docker prune option'
 )
 
+test_topology_options() (
+  source "$INSTALLER"
+  local router_a router_b pin_a pin_b pin_c pin_d temp_dir
+  router_a="$(printf 'a%.0s' {1..64})"
+  router_b="$(printf 'b%.0s' {1..64})"
+  pin_a="$(printf '1%.0s' {1..64})"
+  pin_b="$(printf '2%.0s' {1..64})"
+  pin_c="$(printf '3%.0s' {1..64})"
+  pin_d="$(printf '4%.0s' {1..64})"
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  APP_DIR="$temp_dir"
+  ENV_FILE="$temp_dir/.env.node.prod"
+  parse_args --receive-position Core \
+    --peer "$router_a,https://seed1.example/,${pin_a},${pin_b}" \
+    --peer "$router_b,https://seed2.example/,${pin_c},${pin_d}"
+  APP_DIR="$temp_dir"
+  ENV_FILE="$temp_dir/.env.node.prod"
+  configure_topology
+  assert_eq 'Core' "$(env_get DEEP_NODE_ONION_RECEIVE_POSITION)" 'onion receive role'
+  assert_eq "$router_a" "$(env_get DEEP_PRIVACY_PEER_1_ROUTER_ID)" 'first peer router'
+  assert_eq 'https://seed2.example/' "$(env_get DEEP_PRIVACY_PEER_2_BASE_URL)" 'second peer URL'
+)
+
+test_inline_secret_migration_is_idempotent() (
+  source "$INSTALLER"
+  local temp_dir vless reality
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  APP_DIR="$temp_dir"
+  ENV_FILE="$temp_dir/.env.node.prod"
+  SECRETS_DIR="$temp_dir/secrets"
+  mkdir -p "$SECRETS_DIR"
+  vless='123e4567-e89b-42d3-a456-426614174000'
+  reality='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+  printf 'DEEP_NODE_VLESS_CLIENT_ID=%s\nDEEP_NODE_REALITY_PRIVATE_KEY=%s\n' "$vless" "$reality" >"$ENV_FILE"
+  migrate_inline_transport_secrets
+  migrate_inline_transport_secrets
+  assert_eq "$vless" "$(tr -d '\r\n' <"$SECRETS_DIR/vless-client-id")" 'VLESS secret preserved'
+  assert_eq "$reality" "$(tr -d '\r\n' <"$SECRETS_DIR/reality-private-key")" 'Reality secret preserved'
+  assert_eq '' "$(env_get DEEP_NODE_VLESS_CLIENT_ID)" 'inline VLESS removed'
+  assert_eq '' "$(env_get DEEP_NODE_REALITY_PRIVATE_KEY)" 'inline Reality removed'
+)
+
+test_identity_and_ingress_secrets_are_stable() (
+  source "$INSTALLER"
+  local temp_dir first_hash second_hash
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  APP_DIR="$temp_dir"
+  ENV_FILE="$temp_dir/.env.node.prod"
+  SECRETS_DIR="$temp_dir/secrets"
+  IDENTITY_SCRIPT="$temp_dir/new-xnode-identity.mjs"
+  mkdir -p "$SECRETS_DIR"
+  write_identity_generator
+  generate_identity_if_needed
+  first_hash="$(sha256sum "$SECRETS_DIR/key_ed25519" "$SECRETS_DIR/key_bls" "$SECRETS_DIR/key_x25519" "$SECRETS_DIR/vless-client-id")"
+  generate_identity_if_needed
+  second_hash="$(sha256sum "$SECRETS_DIR/key_ed25519" "$SECRETS_DIR/key_bls" "$SECRETS_DIR/key_x25519" "$SECRETS_DIR/vless-client-id")"
+  assert_eq "$first_hash" "$second_hash" 'identity secrets preserved across rerun'
+  assert_eq '32' "$(wc -c <"$SECRETS_DIR/onion-state-protection.key" | tr -d ' ')" 'raw ONION secret length'
+
+  CERTIFICATE_PROFILE=pinned-self-issued
+  env_set DEEP_INGRESS_HOST seed1.example
+  ensure_ingress_certificates
+  [ -s "$SECRETS_DIR/ingress/current.crt" ]
+  [ -s "$SECRETS_DIR/ingress/next.crt" ]
+  [ "$(tr -d '\r\n' <"$SECRETS_DIR/ingress/current.spki-sha256")" != \
+    "$(tr -d '\r\n' <"$SECRETS_DIR/ingress/next.spki-sha256")" ]
+
+  SECRETS_DIR="$temp_dir/ip-secrets"
+  mkdir -p "$SECRETS_DIR"
+  env_set DEEP_INGRESS_HOST 93.184.216.34
+  ensure_ingress_certificates
+  node "$ROOT_DIR/assets/scripts/production-ingress-spki.mjs" \
+    --profile pinned-self-issued --host 93.184.216.34 \
+    --current-cert "$SECRETS_DIR/ingress/current.crt" \
+    --current-key "$SECRETS_DIR/ingress/current.key" \
+    --current-pin "$SECRETS_DIR/ingress/current.spki-sha256" \
+    --next-cert "$SECRETS_DIR/ingress/next.crt" \
+    --next-key "$SECRETS_DIR/ingress/next.key" \
+    --next-pin "$SECRETS_DIR/ingress/next.spki-sha256" \
+    --client-timeout-seconds 30 --server-timeout-seconds 30 \
+    --quorum-cidr 93.184.216.35/32 >/dev/null
+)
+
 test_docker_log_option_validation() (
   source "$INSTALLER"
   is_docker_log_max_size 50m
@@ -214,6 +300,9 @@ test_external_ip_precedes_proxied_dns
 test_scanner_option_precedence
 test_peer_rpc_option
 test_phase1_options
+test_topology_options
+test_inline_secret_migration_is_idempotent
+test_identity_and_ingress_secrets_are_stable
 test_docker_log_option_validation
 test_peer_endpoint_configuration
 test_compose_contains_phase1_policy_and_logging
