@@ -1,0 +1,20 @@
+name: installer-ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ubuntu-installer-contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate installer syntax
+        run: bash -n ./install-xpoint-node.sh
+      - name: Run non-mutating installer contract tests
+        run: bash ./tests/install-xpoint-node.test.sh
