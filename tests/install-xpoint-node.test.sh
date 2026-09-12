@@ -343,6 +343,9 @@ ENV
   assert_eq '5' "$(env_get DEEP_QUORUM_POLICY_BACKEND_TIMEOUT_SECONDS)" 'quorum policy timeout default'
   assert_eq '100000000000000' "$(env_get DEEP_MAX_REWARD_SIGNATURE_INCREASE_ATOMIC)" 'reward signature cap default'
   assert_eq '300' "$(env_get DEEP_MAX_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS)" 'signature timestamp skew default'
+  assert_eq "$DEFAULT_XPOINT_NETWORK_ID_HEX" "$(env_get DEEP_XPOINT_NETWORK_ID_HEX)" 'official network ID default'
+  assert_eq "$DEFAULT_XPOINT_GENESIS_PIN_HEX" "$(env_get DEEP_XPOINT_GENESIS_PIN_HEX)" 'official genesis pin default'
+  assert_eq "$DEFAULT_XPOINT_DIRECTORY_LEAF_KEY_HEX" "$(env_get DEEP_XPOINT_DIRECTORY_LEAF_KEY_HEX)" 'official directory leaf key default'
   assert_eq '50m' "$(env_get DEEP_DOCKER_LOG_MAX_SIZE)" 'Docker log max-size default'
   assert_eq '5' "$(env_get DEEP_DOCKER_LOG_MAX_FILE)" 'Docker log max-file default'
 )
@@ -360,6 +363,11 @@ test_compose_contains_phase1_policy_and_logging() (
   grep -q 'max-file: ${DEEP_DOCKER_LOG_MAX_FILE:-5}' "$COMPOSE_FILE"
   grep -q 'RegistryRegistration__QuorumPolicyBackendBaseUrl: ${DEEP_STAKING_BACKEND_URL:?set DEEP_STAKING_BACKEND_URL}' "$COMPOSE_FILE"
   grep -q 'RegistryRegistration__EnforceQuorumSigningPolicy: ${DEEP_ENFORCE_QUORUM_SIGNING_POLICY:-true}' "$COMPOSE_FILE"
+  grep -q '^      ContactService__RuntimeActivation: "true"$' "$COMPOSE_FILE"
+  grep -q '^      ContactAuthority__XPointNetworkGenesisPinHex: ${DEEP_XPOINT_GENESIS_PIN_HEX:?set DEEP_XPOINT_GENESIS_PIN_HEX}$' "$COMPOSE_FILE"
+  grep -q '^      ContactRouteClosure__Enabled: "true"$' "$COMPOSE_FILE"
+  grep -q '^      RequiredTerminals__Contact: "true"$' "$COMPOSE_FILE"
+  grep -q '^      RequiredTerminals__GroupControl: "false"$' "$COMPOSE_FILE"
 )
 
 test_existing_reality_sni_is_preserved() (

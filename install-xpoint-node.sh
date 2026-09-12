@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.6.0"
+INSTALLER_VERSION="0.7.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${XPOINT_NODE_DIR:-/opt/xpoint-node}"
 NON_INTERACTIVE=0
@@ -50,6 +50,9 @@ DEFAULT_DOCKER_LOG_MAX_FILE="5"
 DEFAULT_MAX_REWARD_SIGNATURE_INCREASE_ATOMIC="100000000000000"
 DEFAULT_QUORUM_POLICY_TIMEOUT_SECONDS="5"
 DEFAULT_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS="300"
+DEFAULT_XPOINT_NETWORK_ID_HEX="edc5dc1516a847a65fc8ba0e690d000d"
+DEFAULT_XPOINT_GENESIS_PIN_HEX="304911104767ae1036a44c71116a5fcdee3449fc71ea1467c09295f89be3a2b7"
+DEFAULT_XPOINT_DIRECTORY_LEAF_KEY_HEX="3fd0371522bcfe473b36645f76a3817c722887fcbaa39ef75f4644a124d7b359"
 
 COMPOSE_FILE=""
 ENV_FILE=""
@@ -834,6 +837,10 @@ is_canonical_hex32() {
   [[ "$1" =~ ^[0-9a-f]{64}$ ]] && ! [[ "$1" =~ ^0{64}$ ]]
 }
 
+is_canonical_hex16() {
+  [[ "$1" =~ ^[0-9a-f]{32}$ ]] && ! [[ "$1" =~ ^0{32}$ ]]
+}
+
 configure_topology() {
   local receive_position current
   receive_position="$RECEIVE_POSITION_ARG"
@@ -922,6 +929,9 @@ configure_env() {
   env_set DEEP_SERVICE_NODE_REWARDS_ADDRESS "$PROD_SERVICE_NODE_REWARDS"
   env_set DEEP_ARBITRUM_CHAIN_ID "42161"
   env_set DEEP_NETWORK "mainnet"
+  env_set DEEP_XPOINT_NETWORK_ID_HEX "$(env_get DEEP_XPOINT_NETWORK_ID_HEX | grep -E '.+' || printf '%s' "$DEFAULT_XPOINT_NETWORK_ID_HEX")"
+  env_set DEEP_XPOINT_GENESIS_PIN_HEX "$(env_get DEEP_XPOINT_GENESIS_PIN_HEX | grep -E '.+' || printf '%s' "$DEFAULT_XPOINT_GENESIS_PIN_HEX")"
+  env_set DEEP_XPOINT_DIRECTORY_LEAF_KEY_HEX "$(env_get DEEP_XPOINT_DIRECTORY_LEAF_KEY_HEX | grep -E '.+' || printf '%s' "$DEFAULT_XPOINT_DIRECTORY_LEAF_KEY_HEX")"
   env_set DEEP_INGRESS_CERTIFICATE_PROFILE "$CERTIFICATE_PROFILE"
   env_set DEEP_INGRESS_HOST "$(env_get DEEP_NODE_PUBLIC_HOST)"
   env_set DEEP_INGRESS_HTTPS_BIND "$(env_get DEEP_NODE_PUBLIC_PORT)"
@@ -1317,6 +1327,9 @@ validate_for_start() {
     DEEP_NODE_PEER_RPC_PORT \
     DEEP_NODE_PEER_RPC_ENDPOINT \
     DEEP_REGISTRY_URL \
+    DEEP_XPOINT_NETWORK_ID_HEX \
+    DEEP_XPOINT_GENESIS_PIN_HEX \
+    DEEP_XPOINT_DIRECTORY_LEAF_KEY_HEX \
     DEEP_STAKING_BACKEND_URL \
     DEEP_ARBITRUM_RPC_URL \
     DEEP_SERVICE_NODE_REWARDS_ADDRESS \
@@ -1348,6 +1361,12 @@ validate_for_start() {
   if ! validate_address "$(env_get DEEP_OPERATOR_ADDRESS)"; then
     missing+=("DEEP_OPERATOR_ADDRESS")
   fi
+  is_canonical_hex16 "$(env_get DEEP_XPOINT_NETWORK_ID_HEX)" \
+    || missing+=("DEEP_XPOINT_NETWORK_ID_HEX")
+  is_canonical_hex32 "$(env_get DEEP_XPOINT_GENESIS_PIN_HEX)" \
+    || missing+=("DEEP_XPOINT_GENESIS_PIN_HEX")
+  is_canonical_hex32 "$(env_get DEEP_XPOINT_DIRECTORY_LEAF_KEY_HEX)" \
+    || missing+=("DEEP_XPOINT_DIRECTORY_LEAF_KEY_HEX")
   if ! validate_address "$(env_get DEEP_REWARDS_ADDRESS)"; then
     missing+=("DEEP_REWARDS_ADDRESS")
   fi

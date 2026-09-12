@@ -169,6 +169,18 @@ There is no operator-configurable signer URL. On production nodes the signer
 route is accepted only from the XPoint staking control-plane address and is
 rate-limited; other sources receive `404`.
 
+## Production ContactV1 authority
+
+Installer 0.7.0 activates the ContactV1 terminal only against the official
+signed XPoint network authority. The public network ID, genesis authority-core
+pin and directory leaf key are written to `.env.node.prod`; they are trust
+anchors, not secrets. Existing non-placeholder values are preserved during a
+staged upgrade. Startup fails before replacing the running node when any value
+is missing, malformed, or zero, when the Registry package cannot be verified,
+or when ContactV1 readiness is unavailable. The group-control terminal remains
+disabled until its per-group GSR1/DCR1 publication workflow is connected; the
+installer must not imply group readiness from local storage alone.
+
 ## Reality SNI
 
 Default Reality camouflage:
