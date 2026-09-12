@@ -15,6 +15,7 @@ IMPORT_DIR_ARG=""
 UPGRADE_DIR_ARG=""
 PEER_ARGS=()
 ROLLBACK_DIR=""
+ROLLBACK_REQUIRED=0
 
 PUBLIC_HOST_ARG=""
 PUBLIC_PORT_ARG=""
@@ -411,7 +412,7 @@ restore_preupdate_backup() {
   [ -n "$ROLLBACK_DIR" ] || return 1
   [ -s "$ROLLBACK_DIR/config-and-secrets.tar.gz" ] || return 1
 
-  warn "Update health check failed; restoring the pre-update configuration and image tags."
+  warn "Update failed; restoring the pre-update configuration and image tags."
   if [ -s "$ROLLBACK_DIR/image-tags.tsv" ]; then
     local original rollback_tag
     while IFS=$'\t' read -r original rollback_tag; do
@@ -605,7 +606,7 @@ env_get() {
   if [ ! -f "$ENV_FILE" ]; then
     return 0
   fi
-  grep -E "^${key}=" "$ENV_FILE" | tail -n 1 | cut -d= -f2- || true
+  grep -E "^${key}=" "$ENV_FILE" | tail -n 1 | cut -d= -f2- | tr -d '\r' || true
 }
 
 env_set() {
@@ -1442,12 +1443,22 @@ start_or_update_node() {
 
   log "Starting or updating node"
   if ! (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --wait --wait-timeout 180); then
-    if restore_preupdate_backup; then
-      fail "The update failed its health gate and the previous node release was restored."
-    fi
-    fail "The node failed its health gate. No previous installation was available for automatic rollback."
+    fail "The node failed its health gate."
   fi
   (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps)
+}
+
+rollback_failed_update() {
+  local status="$1"
+  trap - EXIT
+  if [ "$status" -ne 0 ] && [ "$ROLLBACK_REQUIRED" -eq 1 ]; then
+    if restore_preupdate_backup; then
+      warn "The failed update was rolled back to the previous healthy node release."
+    else
+      warn "Automatic rollback failed; use the recorded pre-update snapshot before retrying."
+    fi
+  fi
+  exit "$status"
 }
 
 main() {
@@ -1458,6 +1469,10 @@ main() {
   ensure_app_dir
   import_existing_installation
   create_preupdate_backup
+  if [ -n "$ROLLBACK_DIR" ]; then
+    ROLLBACK_REQUIRED=1
+    trap 'rollback_failed_update $?' EXIT
+  fi
   apply_staged_upgrade
   write_compose_file
   write_identity_generator
@@ -1470,6 +1485,7 @@ main() {
   ensure_ingress_certificates
   configure_firewall_if_active
   start_or_update_node
+  ROLLBACK_REQUIRED=0
   prune_docker_if_requested
 
   log "Done. Config: $ENV_FILE"

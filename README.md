@@ -22,7 +22,9 @@ For a reviewed production cutover, `--upgrade-dir DIR` applies a staged
 `.env.node.prod` plus `secrets/` only after the normal pre-update snapshot. It
 refuses to replace any secret that already exists on the node; key or
 certificate rotation remains a separate explicit authority workflow. Use
-`--import-dir` only for an empty installation.
+`--import-dir` only for an empty installation. Any failure after a pre-update
+snapshot—including configuration validation before containers are changed—
+restores the previous configuration and image tags automatically.
 
 `DEEP_STAKE_ATOMIC` is intentionally not a node operator setting. The production
 staking requirement is a protocol/contract value and is fixed in the compose

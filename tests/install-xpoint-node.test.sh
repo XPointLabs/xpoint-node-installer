@@ -146,6 +146,17 @@ test_inline_secret_migration_is_idempotent() (
   assert_eq '' "$(env_get DEEP_NODE_REALITY_PRIVATE_KEY)" 'inline Reality removed'
 )
 
+test_env_get_accepts_crlf_staging_files() (
+  source "$INSTALLER"
+  local temp_dir
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  ENV_FILE="$temp_dir/.env.node.prod"
+  printf 'DEEP_NODE_PUBLIC_PORT=443\r\n' >"$ENV_FILE"
+  assert_eq '443' "$(env_get DEEP_NODE_PUBLIC_PORT)" 'CRLF environment value normalized'
+  is_tcp_port "$(env_get DEEP_NODE_PUBLIC_PORT)"
+)
+
 test_staged_upgrade_preserves_existing_secrets() (
   source "$INSTALLER"
   local temp_dir app_dir source_dir relative
@@ -208,6 +219,22 @@ test_staged_upgrade_rejects_secret_replacement() (
     exit 1
   fi
   assert_eq 'existing' "$(cat "$app_dir/secrets/key_ed25519")" 'existing secret retained after rejection'
+)
+
+test_failed_update_runs_rollback_handler() (
+  source "$INSTALLER"
+  local temp_dir marker status
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  marker="$temp_dir/restored"
+  status=0
+  (
+    ROLLBACK_REQUIRED=1
+    restore_preupdate_backup() { printf 'yes' >"$marker"; }
+    rollback_failed_update 23
+  ) >/dev/null 2>&1 || status=$?
+  assert_eq '23' "$status" 'failed update retains original exit status'
+  assert_eq 'yes' "$(cat "$marker")" 'failed update invokes rollback'
 )
 
 test_identity_and_ingress_secrets_are_stable() (
@@ -366,8 +393,10 @@ test_peer_rpc_option
 test_phase1_options
 test_topology_options
 test_inline_secret_migration_is_idempotent
+test_env_get_accepts_crlf_staging_files
 test_staged_upgrade_preserves_existing_secrets
 test_staged_upgrade_rejects_secret_replacement
+test_failed_update_runs_rollback_handler
 test_identity_and_ingress_secrets_are_stable
 test_docker_log_option_validation
 test_peer_endpoint_configuration
