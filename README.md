@@ -25,6 +25,8 @@ certificate rotation remains a separate explicit authority workflow. Use
 `--import-dir` only for an empty installation. Any failure after a pre-update
 snapshot—including configuration validation before containers are changed—
 restores the previous configuration and image tags automatically.
+When the container health gate fails, a bounded, mode-`0600` service log and
+compose-status snapshot is retained beside that rollback snapshot for diagnosis.
 
 `DEEP_STAKE_ATOMIC` is intentionally not a node operator setting. The production
 staking requirement is a protocol/contract value and is fixed in the compose

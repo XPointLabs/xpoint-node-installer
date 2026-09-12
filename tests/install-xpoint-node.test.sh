@@ -237,6 +237,29 @@ test_failed_update_runs_rollback_handler() (
   assert_eq 'yes' "$(cat "$marker")" 'failed update invokes rollback'
 )
 
+test_failed_update_diagnostics_are_bounded() (
+  source "$INSTALLER"
+  local temp_dir
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  APP_DIR="$temp_dir/app"
+  ENV_FILE="$APP_DIR/.env.node.prod"
+  COMPOSE_FILE="$APP_DIR/docker-compose.node.prod.yml"
+  ROLLBACK_DIR="$APP_DIR/backups/pre-update-test"
+  COMPOSE_CMD=(fake-compose)
+  mkdir -p "$ROLLBACK_DIR"
+  fake-compose() {
+    case "$*" in
+      *' ps --all') printf 'bounded-ps\n' ;;
+      *' logs --no-color --tail 200 '*) printf 'bounded-logs\n' ;;
+      *) return 1 ;;
+    esac
+  }
+  capture_failed_update_diagnostics
+  grep -q '^bounded-ps$' "$ROLLBACK_DIR/failed-update-diagnostics.log"
+  grep -q '^bounded-logs$' "$ROLLBACK_DIR/failed-update-diagnostics.log"
+)
+
 test_identity_and_ingress_secrets_are_stable() (
   source "$INSTALLER"
   local temp_dir first_hash second_hash
@@ -397,6 +420,7 @@ test_env_get_accepts_crlf_staging_files
 test_staged_upgrade_preserves_existing_secrets
 test_staged_upgrade_rejects_secret_replacement
 test_failed_update_runs_rollback_handler
+test_failed_update_diagnostics_are_bounded
 test_identity_and_ingress_secrets_are_stable
 test_docker_log_option_validation
 test_peer_endpoint_configuration

@@ -1418,6 +1418,23 @@ local_image_exists() {
   "${DOCKER_CMD[@]}" image inspect "$1" >/dev/null 2>&1
 }
 
+capture_failed_update_diagnostics() {
+  [ -n "$ROLLBACK_DIR" ] || return 0
+  local diagnostics="$ROLLBACK_DIR/failed-update-diagnostics.log"
+  {
+    printf 'capturedUtc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '%s\n' '--- compose ps ---'
+    (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" \
+      -f "$COMPOSE_FILE" ps --all) || true
+    printf '%s\n' '--- bounded service logs ---'
+    (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" \
+      -f "$COMPOSE_FILE" logs --no-color --tail 200 xnode storage-service \
+      ingress-preflight ingress) || true
+  } >"$diagnostics" 2>&1
+  chmod 600 "$diagnostics"
+  warn "Bounded failed-update diagnostics were retained in the pre-update snapshot."
+}
+
 start_or_update_node() {
   if [ "$START_NODE" -ne 1 ]; then
     log "Skipping docker compose start because --no-start was used"
@@ -1443,6 +1460,7 @@ start_or_update_node() {
 
   log "Starting or updating node"
   if ! (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --wait --wait-timeout 180); then
+    capture_failed_update_diagnostics
     fail "The node failed its health gate."
   fi
   (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps)
