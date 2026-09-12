@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.5.0"
+INSTALLER_VERSION="0.6.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${XPOINT_NODE_DIR:-/opt/xpoint-node}"
 NON_INTERACTIVE=0
@@ -12,6 +12,7 @@ REALITY_MODE="${XPOINT_REALITY_MODE:-prompt}"
 CERTIFICATE_PROFILE="${XPOINT_CERTIFICATE_PROFILE:-pinned-self-issued}"
 RECEIVE_POSITION_ARG=""
 IMPORT_DIR_ARG=""
+UPGRADE_DIR_ARG=""
 PEER_ARGS=()
 ROLLBACK_DIR=""
 
@@ -80,6 +81,8 @@ Options:
   --peer SPEC                  Peer as ROUTER_ID,HTTPS_BASE_URL,CURRENT_PIN,NEXT_PIN
                                (repeat exactly twice for the three-router topology)
   --import-dir DIR             Import an existing .env.node.prod and secrets directory
+  --upgrade-dir DIR            Apply a staged env/secrets set to an existing node after
+                               verifying that every existing secret is byte-identical
   --xnode-image IMAGE          XPoint node image
   --storage-image IMAGE        Per-node storage service image
   --docker-log-max-size SIZE   Docker json-file max-size (default: 50m)
@@ -129,6 +132,7 @@ parse_args() {
       --receive-position) RECEIVE_POSITION_ARG="${2:?missing value for --receive-position}"; shift 2 ;;
       --peer) PEER_ARGS+=("${2:?missing value for --peer}"); shift 2 ;;
       --import-dir) IMPORT_DIR_ARG="${2:?missing value for --import-dir}"; shift 2 ;;
+      --upgrade-dir) UPGRADE_DIR_ARG="${2:?missing value for --upgrade-dir}"; shift 2 ;;
       --xnode-image) XNODE_IMAGE_ARG="${2:?missing value for --xnode-image}"; shift 2 ;;
       --storage-image) STORAGE_IMAGE_ARG="${2:?missing value for --storage-image}"; shift 2 ;;
       --docker-log-max-size) DOCKER_LOG_MAX_SIZE_ARG="${2:?missing value for --docker-log-max-size}"; shift 2 ;;
@@ -148,6 +152,9 @@ parse_args() {
       *) fail "Unknown option: $1" ;;
     esac
   done
+
+  [ -z "$IMPORT_DIR_ARG" ] || [ -z "$UPGRADE_DIR_ARG" ] \
+    || fail "--import-dir and --upgrade-dir are mutually exclusive."
 
   COMPOSE_FILE="$APP_DIR/docker-compose.node.prod.yml"
   ENV_FILE="$APP_DIR/.env.node.prod"
@@ -313,6 +320,53 @@ import_existing_installation() {
   cp -a "$source_dir/secrets/." "$SECRETS_DIR/"
   chmod 700 "$SECRETS_DIR"
   find "$SECRETS_DIR" -type f -exec chmod 600 {} +
+}
+
+apply_staged_upgrade() {
+  [ -n "$UPGRADE_DIR_ARG" ] || return 0
+
+  local source_dir source_secrets staged_env staged_secrets relative existing
+  source_dir="$(cd "$UPGRADE_DIR_ARG" 2>/dev/null && pwd)" \
+    || fail "Upgrade directory does not exist: $UPGRADE_DIR_ARG"
+  source_secrets="$source_dir/secrets"
+  [ "$source_dir" != "$APP_DIR" ] \
+    || fail "--upgrade-dir must not be the installation directory itself."
+  [ -s "$ENV_FILE" ] \
+    || fail "--upgrade-dir requires an existing non-empty $ENV_FILE."
+  [ -f "$source_dir/.env.node.prod" ] \
+    || fail "Upgrade directory is missing .env.node.prod."
+  [ -d "$source_secrets" ] \
+    || fail "Upgrade directory is missing secrets/."
+  [ -z "$(find "$source_secrets" -type l -print -quit)" ] \
+    || fail "Upgrade secrets must not contain symbolic links."
+  [ -z "$(find "$source_secrets" -mindepth 1 ! -type d ! -type f -print -quit)" ] \
+    || fail "Upgrade secrets may contain only directories and regular files."
+
+  for relative in key_ed25519 key_bls key_x25519 onion-state-protection.key \
+      vless-client-id reality-private-key ingress/current.crt ingress/current.key \
+      ingress/current.spki-sha256 ingress/next.crt ingress/next.key \
+      ingress/next.spki-sha256; do
+    [ -f "$source_secrets/$relative" ] \
+      || fail "Upgrade directory is missing secrets/$relative."
+    existing="$SECRETS_DIR/$relative"
+    if [ -f "$existing" ] && ! cmp -s "$existing" "$source_secrets/$relative"; then
+      fail "Staged upgrade would replace existing secrets/$relative; rotate it through an explicit authority workflow instead."
+    fi
+  done
+
+  staged_env="$APP_DIR/.env.node.prod.upgrade-stage"
+  staged_secrets="$APP_DIR/secrets.upgrade-stage"
+  rm -rf "$staged_secrets"
+  install -m 0600 "$source_dir/.env.node.prod" "$staged_env"
+  mkdir -p "$staged_secrets"
+  chmod 700 "$staged_secrets"
+  cp -a "$source_secrets/." "$staged_secrets/"
+  find "$staged_secrets" -type f -exec chmod 600 {} +
+
+  log "Applying the verified staged production configuration"
+  rm -rf "$SECRETS_DIR"
+  mv "$staged_secrets" "$SECRETS_DIR"
+  mv "$staged_env" "$ENV_FILE"
 }
 
 create_preupdate_backup() {
@@ -1404,6 +1458,7 @@ main() {
   ensure_app_dir
   import_existing_installation
   create_preupdate_backup
+  apply_staged_upgrade
   write_compose_file
   write_identity_generator
   write_env_template_if_missing

@@ -146,6 +146,70 @@ test_inline_secret_migration_is_idempotent() (
   assert_eq '' "$(env_get DEEP_NODE_REALITY_PRIVATE_KEY)" 'inline Reality removed'
 )
 
+test_staged_upgrade_preserves_existing_secrets() (
+  source "$INSTALLER"
+  local temp_dir app_dir source_dir relative
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  app_dir="$temp_dir/app"
+  source_dir="$temp_dir/source"
+  mkdir -p "$app_dir/secrets" "$source_dir/secrets/ingress"
+  printf 'DEEP_NODE_PUBLIC_HOST=old.example\n' >"$app_dir/.env.node.prod"
+  printf 'DEEP_NODE_PUBLIC_HOST=new.example\n' >"$source_dir/.env.node.prod"
+  for relative in key_ed25519 key_bls key_x25519 onion-state-protection.key \
+      vless-client-id reality-private-key ingress/current.crt ingress/current.key \
+      ingress/current.spki-sha256 ingress/next.crt ingress/next.key \
+      ingress/next.spki-sha256; do
+    mkdir -p "$(dirname "$source_dir/secrets/$relative")"
+    printf 'candidate-%s' "$relative" >"$source_dir/secrets/$relative"
+  done
+  cp "$source_dir/secrets/key_ed25519" "$app_dir/secrets/key_ed25519"
+  cp "$source_dir/secrets/key_bls" "$app_dir/secrets/key_bls"
+
+  APP_DIR="$app_dir"
+  ENV_FILE="$app_dir/.env.node.prod"
+  SECRETS_DIR="$app_dir/secrets"
+  UPGRADE_DIR_ARG="$source_dir"
+  apply_staged_upgrade
+
+  assert_eq 'DEEP_NODE_PUBLIC_HOST=new.example' "$(cat "$ENV_FILE")" 'staged env applied'
+  for relative in key_ed25519 key_bls key_x25519 onion-state-protection.key \
+      vless-client-id reality-private-key ingress/current.crt ingress/current.key \
+      ingress/current.spki-sha256 ingress/next.crt ingress/next.key \
+      ingress/next.spki-sha256; do
+    assert_eq "candidate-$relative" "$(cat "$SECRETS_DIR/$relative")" "staged secret $relative applied"
+  done
+)
+
+test_staged_upgrade_rejects_secret_replacement() (
+  source "$INSTALLER"
+  local temp_dir app_dir source_dir relative
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  app_dir="$temp_dir/app"
+  source_dir="$temp_dir/source"
+  mkdir -p "$app_dir/secrets" "$source_dir/secrets/ingress"
+  printf 'OLD=1\n' >"$app_dir/.env.node.prod"
+  printf 'NEW=1\n' >"$source_dir/.env.node.prod"
+  printf 'existing' >"$app_dir/secrets/key_ed25519"
+  for relative in key_ed25519 key_bls key_x25519 onion-state-protection.key \
+      vless-client-id reality-private-key ingress/current.crt ingress/current.key \
+      ingress/current.spki-sha256 ingress/next.crt ingress/next.key \
+      ingress/next.spki-sha256; do
+    mkdir -p "$(dirname "$source_dir/secrets/$relative")"
+    printf 'candidate-%s' "$relative" >"$source_dir/secrets/$relative"
+  done
+  APP_DIR="$app_dir"
+  ENV_FILE="$app_dir/.env.node.prod"
+  SECRETS_DIR="$app_dir/secrets"
+  UPGRADE_DIR_ARG="$source_dir"
+  if (apply_staged_upgrade >/dev/null 2>&1); then
+    printf 'FAIL: staged upgrade replaced an existing secret\n' >&2
+    exit 1
+  fi
+  assert_eq 'existing' "$(cat "$app_dir/secrets/key_ed25519")" 'existing secret retained after rejection'
+)
+
 test_identity_and_ingress_secrets_are_stable() (
   source "$INSTALLER"
   local temp_dir first_hash second_hash
@@ -302,6 +366,8 @@ test_peer_rpc_option
 test_phase1_options
 test_topology_options
 test_inline_secret_migration_is_idempotent
+test_staged_upgrade_preserves_existing_secrets
+test_staged_upgrade_rejects_secret_replacement
 test_identity_and_ingress_secrets_are_stable
 test_docker_log_option_validation
 test_peer_endpoint_configuration

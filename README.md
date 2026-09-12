@@ -18,6 +18,12 @@ The installer is idempotent:
 - pulls the configured images and requires `docker compose up --wait` to pass;
 - automatically restores the snapshot and old image tags when health fails.
 
+For a reviewed production cutover, `--upgrade-dir DIR` applies a staged
+`.env.node.prod` plus `secrets/` only after the normal pre-update snapshot. It
+refuses to replace any secret that already exists on the node; key or
+certificate rotation remains a separate explicit authority workflow. Use
+`--import-dir` only for an empty installation.
+
 `DEEP_STAKE_ATOMIC` is intentionally not a node operator setting. The production
 staking requirement is a protocol/contract value and is fixed in the compose
 file as `25,000 XPNT` (`25000000000000` atomic units).
