@@ -237,6 +237,29 @@ test_failed_update_runs_rollback_handler() (
   assert_eq 'yes' "$(cat "$marker")" 'failed update invokes rollback'
 )
 
+test_digest_rollback_keeps_immutable_reference() (
+  source "$INSTALLER"
+  local temp_dir calls
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  calls="$temp_dir/docker.calls"
+  DOCKER_CMD=(fake-docker)
+  fake-docker() {
+    printf '%s\n' "$*" >>"$calls"
+    case "$*" in
+      'image inspect --format {{.Id}} '*) printf 'sha256:captured\n' ;;
+      *) return 1 ;;
+    esac
+  }
+
+  restore_rollback_image_reference \
+    'ghcr.io/xpointlabs/xnode@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+    'xpoint-rollback:stamp-xnode'
+
+  assert_eq '2' "$(wc -l <"$calls" | tr -d ' ')" 'digest rollback inspects both references'
+  ! grep -q 'image tag' "$calls"
+)
+
 test_failed_update_diagnostics_are_bounded() (
   source "$INSTALLER"
   local temp_dir
@@ -428,6 +451,7 @@ test_env_get_accepts_crlf_staging_files
 test_staged_upgrade_preserves_existing_secrets
 test_staged_upgrade_rejects_secret_replacement
 test_failed_update_runs_rollback_handler
+test_digest_rollback_keeps_immutable_reference
 test_failed_update_diagnostics_are_bounded
 test_identity_and_ingress_secrets_are_stable
 test_docker_log_option_validation

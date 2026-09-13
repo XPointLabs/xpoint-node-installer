@@ -420,7 +420,7 @@ restore_preupdate_backup() {
     local original rollback_tag
     while IFS=$'\t' read -r original rollback_tag; do
       [ -n "$original" ] && [ -n "$rollback_tag" ] || continue
-      "${DOCKER_CMD[@]}" image tag "$rollback_tag" "$original"
+      restore_rollback_image_reference "$original" "$rollback_tag"
     done <"$ROLLBACK_DIR/image-tags.tsv"
   fi
   rm -rf "$SECRETS_DIR" "$INGRESS_CONFIG_DIR" "$RUNTIME_SCRIPTS_DIR"
@@ -429,6 +429,20 @@ restore_preupdate_backup() {
   chmod 700 "$SECRETS_DIR"
   find "$SECRETS_DIR" -type f -exec chmod 600 {} +
   (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --wait --remove-orphans)
+}
+
+restore_rollback_image_reference() {
+  local original="$1"
+  local rollback_tag="$2"
+  if [[ "$original" == *@sha256:* ]]; then
+    local original_id rollback_id
+    original_id="$("${DOCKER_CMD[@]}" image inspect --format '{{.Id}}' "$original")"
+    rollback_id="$("${DOCKER_CMD[@]}" image inspect --format '{{.Id}}' "$rollback_tag")"
+    [ -n "$original_id" ] && [ "$original_id" = "$rollback_id" ] \
+      || fail "Rollback digest no longer resolves to the captured image."
+    return 0
+  fi
+  "${DOCKER_CMD[@]}" image tag "$rollback_tag" "$original"
 }
 
 write_compose_file() {
