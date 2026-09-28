@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.8.0"
+INSTALLER_VERSION="0.8.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${XPOINT_NODE_DIR:-/opt/xpoint-node}"
 NON_INTERACTIVE=0
@@ -44,6 +44,7 @@ DEFAULT_PUSH_NOTIFY_URL="https://push.xpoint.network/_compat/push-notify"
 DEFAULT_ARBITRUM_RPC_URL="https://arb1.arbitrum.io/rpc"
 DEFAULT_XNODE_IMAGE="ghcr.io/xpointlabs/xnode:latest"
 DEFAULT_STORAGE_IMAGE="ghcr.io/xpointlabs/deep-storage-service:latest"
+INSTALLER_NODE_IMAGE="node:24-bookworm-slim@sha256:242549cd46785b480c832479a730f4f2a20865d61ea2e404fdb2a5c3d3b73ecf"
 DEFAULT_REALITY_SNI="cloudflare-dns.com"
 DEFAULT_DOCKER_LOG_MAX_SIZE="50m"
 DEFAULT_DOCKER_LOG_MAX_FILE="5"
@@ -1032,7 +1033,7 @@ migrate_inline_transport_secrets() {
 generate_identity_if_needed() {
   log "Ensuring independent Ed25519, BLS, X25519, VLESS, and ONION secrets"
   local output
-  output="$(node "$IDENTITY_SCRIPT" --as-env --out-dir "$SECRETS_DIR")"
+  output="$(run_installer_node "$IDENTITY_SCRIPT" --as-env --out-dir "$SECRETS_DIR")"
   printf '%s\n' "$output" >"$APP_DIR/identity.generated.env"
   chmod 600 "$APP_DIR/identity.generated.env" "$SECRETS_DIR/key_ed25519" "$SECRETS_DIR/key_bls" \
     "$SECRETS_DIR/key_x25519" "$SECRETS_DIR/vless-client-id"
@@ -1314,12 +1315,32 @@ ensure_ingress_certificates() {
   env_set DEEP_INGRESS_NEXT_SPKI_FILE "./secrets/ingress/next.spki-sha256"
 }
 
+run_installer_node() {
+  local tool="$1"
+  shift
+  if command_exists node && node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' >/dev/null 2>&1; then
+    node "$tool" "$@"
+    return
+  fi
+  # Distribution Node.js may predate X509Certificate/node: APIs. Do not alter
+  # the host's package sources; use the existing Docker dependency, immutable
+  # official runtime and only the directories this installer needs.
+  local container_tool="/installer-tool.${tool##*.}"
+  local mounts=(-v "$APP_DIR:$APP_DIR" -v "$tool:$container_tool:ro")
+  if [ -n "$DID2_RUNTIME_DIR_ARG" ]; then
+    mounts+=(-v "$DID2_RUNTIME_DIR_ARG:$DID2_RUNTIME_DIR_ARG:ro")
+  fi
+  "${DOCKER_CMD[@]}" run --rm --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+    "${mounts[@]}" "$INSTALLER_NODE_IMAGE" node "$container_tool" "$@"
+}
+
 configure_did2_runtime() {
   local selected="$APP_DIR/config/did2-runtime.active.env"
   local staged_dir key value count=0
   if [ -n "$DID2_RUNTIME_DIR_ARG" ]; then
     staged_dir="$(mktemp -d "$APP_DIR/.did2-stage.XXXXXX")"
-    if ! node "$SCRIPT_DIR/assets/scripts/stage-did2-runtime.cjs" \
+    if ! run_installer_node "$SCRIPT_DIR/assets/scripts/stage-did2-runtime.cjs" \
         "$DID2_RUNTIME_DIR_ARG" "$APP_DIR" "$staged_dir/updates.env"; then
       rmdir "$staged_dir" 2>/dev/null || true
       fail "DID2 runtime inputs failed bounded custody validation."

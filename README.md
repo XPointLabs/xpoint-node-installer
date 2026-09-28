@@ -1,5 +1,11 @@
 # XPoint Production Node Installer
 
+Installer tools use host Node.js 22+ when available. On older distributions,
+the installer uses the digest-pinned official Node.js 24 Docker runtime with
+network disabled and only installation/input mounts; it does not replace host
+Node.js or add package repositories. The initial image pull requires registry
+access. Keys and custody validation follow the same tool on either runtime.
+
 Public Linux installer for a production XPoint service node.
 
 The installer is idempotent:
@@ -173,7 +179,7 @@ There is no operator-configurable signer URL. On production nodes the signer
 route is accepted only from the XPoint staking control-plane address and is
 rate-limited; other sources receive `404`.
 
-## DID2 candidate installation (0.8.0)
+## DID2 candidate installation (0.8.1)
 
 The compose no longer activates V1 ContactAuthority or group-control authority.
 Fresh preparation uses `--no-start`, followed by enrollment and externally

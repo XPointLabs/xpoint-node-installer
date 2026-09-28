@@ -410,6 +410,32 @@ test_fresh_environment_asset_is_present_and_rerunnable() (
   ! grep -q 'DEEP_NODE_ONION_RECEIVE_POSITION\|_compat/' "$ENV_FILE"
 )
 
+test_node_runtime_is_bounded_on_old_hosts() (
+  source "$INSTALLER"
+  local temp_dir
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  APP_DIR="$temp_dir/installation"
+  DID2_RUNTIME_DIR_ARG="$temp_dir/input"
+  mkdir -p "$APP_DIR" "$DID2_RUNTIME_DIR_ARG"
+  DOCKER_CMD=(fake-docker)
+  node() { return 1; }
+  fake-docker() { printf '%s\n' "$@" >"$temp_dir/container-arguments"; }
+  run_installer_node "$ROOT_DIR/assets/scripts/stage-did2-runtime.cjs" \
+    "$DID2_RUNTIME_DIR_ARG" "$APP_DIR" "$APP_DIR/updates.env"
+  for argument in '--rm' '--read-only' '--cap-drop' 'ALL' 'none' \
+    'no-new-privileges' "$INSTALLER_NODE_IMAGE" '/installer-tool.cjs' \
+    "$DID2_RUNTIME_DIR_ARG:$DID2_RUNTIME_DIR_ARG:ro" "$APP_DIR:$APP_DIR"; do
+    grep -Fxq -- "$argument" "$temp_dir/container-arguments"
+  done
+  run_installer_node "$temp_dir/new-xnode-identity.mjs" --as-env --out-dir "$APP_DIR/secrets"
+  grep -Fxq '/installer-tool.mjs' "$temp_dir/container-arguments"
+  node() { printf '%s\n' "$@" >>"$temp_dir/native-arguments"; }
+  fake-docker() { printf 'FAIL: modern native Node used Docker\n' >&2; return 1; }
+  run_installer_node "$ROOT_DIR/assets/scripts/stage-did2-runtime.cjs" native-input
+  grep -Fxq 'native-input' "$temp_dir/native-arguments"
+)
+
 test_did2_runtime_selection_is_closed_and_rerunnable() (
   source "$INSTALLER"
   local temp_dir selected key suffix before
@@ -537,6 +563,7 @@ test_peer_endpoint_configuration
 test_compose_contains_phase1_policy_and_logging
 test_fresh_environment_asset_is_present_and_rerunnable
 test_did2_runtime_selection_is_closed_and_rerunnable
+test_node_runtime_is_bounded_on_old_hosts
 test_existing_reality_sni_is_preserved
 test_bounded_scanner_result
 printf 'PASS: install-xpoint-node tests\n'
