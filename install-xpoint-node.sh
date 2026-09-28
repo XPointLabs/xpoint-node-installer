@@ -10,7 +10,6 @@ ROTATE_REALITY=0
 PRUNE_DOCKER=0
 REALITY_MODE="${XPOINT_REALITY_MODE:-prompt}"
 CERTIFICATE_PROFILE="${XPOINT_CERTIFICATE_PROFILE:-pinned-self-issued}"
-RECEIVE_POSITION_ARG=""
 IMPORT_DIR_ARG=""
 UPGRADE_DIR_ARG=""
 PEER_ARGS=()
@@ -81,7 +80,6 @@ Options:
   --rpc-url URL                Arbitrum One RPC URL used by the node backend
   --fallback-rpc-urls URLS     Comma-separated fallback Arbitrum One RPC URLs
   --peer-rpc-port PORT         Public signed node-to-node RPC port (default: 22020)
-  --receive-position ROLE      Onion role: Ingress, Core, or Exit
   --peer SPEC                  Peer as ROUTER_ID,HTTPS_BASE_URL,CURRENT_PIN,NEXT_PIN
                                (repeat exactly twice for the three-router topology)
   --import-dir DIR             Import an existing .env.node.prod and secrets directory
@@ -133,7 +131,6 @@ parse_args() {
       --rpc-url) RPC_URL_ARG="${2:?missing value for --rpc-url}"; shift 2 ;;
       --fallback-rpc-urls) FALLBACK_RPC_URLS_ARG="${2:?missing value for --fallback-rpc-urls}"; shift 2 ;;
       --peer-rpc-port) PEER_RPC_PORT_ARG="${2:?missing value for --peer-rpc-port}"; shift 2 ;;
-      --receive-position) RECEIVE_POSITION_ARG="${2:?missing value for --receive-position}"; shift 2 ;;
       --peer) PEER_ARGS+=("${2:?missing value for --peer}"); shift 2 ;;
       --import-dir) IMPORT_DIR_ARG="${2:?missing value for --import-dir}"; shift 2 ;;
       --upgrade-dir) UPGRADE_DIR_ARG="${2:?missing value for --upgrade-dir}"; shift 2 ;;
@@ -856,16 +853,7 @@ is_canonical_hex16() {
 }
 
 configure_topology() {
-  local receive_position current
-  receive_position="$RECEIVE_POSITION_ARG"
-  if [ -z "$receive_position" ]; then
-    receive_position="$(env_get DEEP_NODE_ONION_RECEIVE_POSITION)"
-  fi
-  case "$receive_position" in
-    Ingress|Core|Exit) env_set DEEP_NODE_ONION_RECEIVE_POSITION "$receive_position" ;;
-    "") ;;
-    *) fail "--receive-position must be Ingress, Core, or Exit." ;;
-  esac
+  local current
 
   [ "${#PEER_ARGS[@]}" -eq 0 ] || [ "${#PEER_ARGS[@]}" -eq 2 ] \
     || fail "Specify --peer exactly twice for the three-router production topology."
@@ -1359,7 +1347,6 @@ validate_for_start() {
     DEEP_NODE_ED25519_PRIVATE_KEY_FILE \
     DEEP_NODE_X25519_PRIVATE_KEY_FILE \
     DEEP_NODE_ONION_STATE_PROTECTION_FILE \
-    DEEP_NODE_ONION_RECEIVE_POSITION \
     DEEP_NODE_BLS_PRIVATE_KEY_FILE \
     DEEP_NODE_VLESS_CLIENT_ID_FILE \
     DEEP_NODE_REALITY_SERVER_NAME \
@@ -1425,10 +1412,6 @@ validate_for_start() {
   [ "$public_port" != "$peer_port" ] || fail "Reality and node-to-node RPC must use different public ports."
   [ "$peer_endpoint" = "http://${public_ip}:${peer_port}/api/peer/onion" ] || \
     fail "DEEP_NODE_PEER_RPC_ENDPOINT must match the generated public IP and peer port."
-  case "$(env_get DEEP_NODE_ONION_RECEIVE_POSITION)" in
-    Ingress|Core|Exit) ;;
-    *) fail "DEEP_NODE_ONION_RECEIVE_POSITION must be Ingress, Core, or Exit." ;;
-  esac
   [ -z "$(env_get DEEP_NODE_VLESS_CLIENT_ID)" ] \
     || fail "Inline DEEP_NODE_VLESS_CLIENT_ID must be migrated to a secret file."
   [ -z "$(env_get DEEP_NODE_REALITY_PRIVATE_KEY)" ] \

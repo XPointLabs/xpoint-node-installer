@@ -115,13 +115,12 @@ test_topology_options() (
   trap 'rm -rf "$temp_dir"' EXIT
   APP_DIR="$temp_dir"
   ENV_FILE="$temp_dir/.env.node.prod"
-  parse_args --receive-position Core \
+  parse_args \
     --peer "$router_a,https://seed1.example/,${pin_a},${pin_b}" \
     --peer "$router_b,https://seed2.example/,${pin_c},${pin_d}"
   APP_DIR="$temp_dir"
   ENV_FILE="$temp_dir/.env.node.prod"
   configure_topology
-  assert_eq 'Core' "$(env_get DEEP_NODE_ONION_RECEIVE_POSITION)" 'onion receive role'
   assert_eq "$router_a" "$(env_get DEEP_PRIVACY_PEER_1_ROUTER_ID)" 'first peer router'
   assert_eq 'https://seed2.example/' "$(env_get DEEP_PRIVACY_PEER_2_BASE_URL)" 'second peer URL'
 )

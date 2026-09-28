@@ -47,7 +47,6 @@ cd xpoint-node-installer
 sudo ./install-xpoint-node.sh \
   --public-host seed1.example.net \
   --public-port 443 \
-  --receive-position Ingress \
   --peer ROUTER_ID_2,https://seed2.example.net/,CURRENT_SPKI_2,NEXT_SPKI_2 \
   --peer ROUTER_ID_3,https://seed3.example.net/,CURRENT_SPKI_3,NEXT_SPKI_3 \
   --operator-address 0x0000000000000000000000000000000000000000 \
@@ -57,6 +56,11 @@ sudo ./install-xpoint-node.sh \
 
 Use the actual operator and rewards wallet addresses. The example zero address
 will not pass the start validation.
+
+Fixed onion receive-role arguments are retired. The new host derives permitted
+roles from signed current DID2 node descriptors. DID2 proof/observer/network-history
+deployment wiring remains a release prerequisite; running the installer alone is
+not evidence of a working messaging path. See [the node operator contract](../xnode/docs/operator.md).
 
 A purchased domain and an operator-managed/public-CA certificate are not
 required. `--public-host` accepts a DNS name or public IP. Xray Reality provides
