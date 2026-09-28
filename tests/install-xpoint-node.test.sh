@@ -436,6 +436,24 @@ test_node_runtime_is_bounded_on_old_hosts() (
   grep -Fxq 'native-input' "$temp_dir/native-arguments"
 )
 
+test_activation_reloads_mounted_assets() (
+  source "$INSTALLER"
+  local temp_dir
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  APP_DIR="$temp_dir"
+  ENV_FILE="$temp_dir/.env.node.prod"
+  COMPOSE_FILE="$temp_dir/compose.yml"
+  COMPOSE_CMD=(fake-compose)
+  validate_for_start() { return 0; }
+  fake-compose() { printf '%s\n' "$@" >>"$temp_dir/compose-arguments"; }
+  start_or_update_node >/dev/null
+  grep -Fxq -- '--force-recreate' "$temp_dir/compose-arguments"
+  grep -Fxq -- '--wait' "$temp_dir/compose-arguments"
+  grep -Fxq -- '180' "$temp_dir/compose-arguments"
+  ! grep -Fxq -- '--volumes' "$temp_dir/compose-arguments"
+)
+
 test_did2_runtime_selection_is_closed_and_rerunnable() (
   source "$INSTALLER"
   local temp_dir selected key suffix before
@@ -564,6 +582,7 @@ test_compose_contains_phase1_policy_and_logging
 test_fresh_environment_asset_is_present_and_rerunnable
 test_did2_runtime_selection_is_closed_and_rerunnable
 test_node_runtime_is_bounded_on_old_hosts
+test_activation_reloads_mounted_assets
 test_existing_reality_sni_is_preserved
 test_bounded_scanner_result
 printf 'PASS: install-xpoint-node tests\n'

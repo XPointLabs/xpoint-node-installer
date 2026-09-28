@@ -5,6 +5,9 @@ the installer uses the digest-pinned official Node.js 24 Docker runtime with
 network disabled and only installation/input mounts; it does not replace host
 Node.js or add package repositories. The initial image pull requires registry
 access. Keys and custody validation follow the same tool on either runtime.
+An activating install/rerun recreates service containers so updated mounted
+scripts/templates take effect even when image digests and paths are unchanged.
+Persistent volumes and selected key files are retained; plan a restart window.
 
 Public Linux installer for a production XPoint service node.
 

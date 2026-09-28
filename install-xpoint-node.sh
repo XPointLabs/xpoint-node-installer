@@ -1552,7 +1552,10 @@ start_or_update_node() {
   fi
 
   log "Starting or updating node"
-  if ! (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --wait --wait-timeout 180); then
+  # Bind-mounted scripts/templates can change while compose paths and image
+  # digests stay identical. Recreate processes so the health gate checks the
+  # selected release assets, not a still-running previous ingress config.
+  if ! (cd "$APP_DIR" && "${COMPOSE_CMD[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --wait --wait-timeout 180 --force-recreate); then
     capture_failed_update_diagnostics
     fail "The node failed its health gate."
   fi
