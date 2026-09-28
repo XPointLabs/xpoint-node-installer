@@ -367,7 +367,7 @@ ENV
   assert_eq '300' "$(env_get DEEP_MAX_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS)" 'signature timestamp skew default'
   assert_eq "$DEFAULT_XPOINT_NETWORK_ID_HEX" "$(env_get DEEP_XPOINT_NETWORK_ID_HEX)" 'official network ID default'
   assert_eq "$DEFAULT_XPOINT_GENESIS_PIN_HEX" "$(env_get DEEP_XPOINT_GENESIS_PIN_HEX)" 'official genesis pin default'
-  assert_eq "$DEFAULT_XPOINT_DIRECTORY_LEAF_KEY_HEX" "$(env_get DEEP_XPOINT_DIRECTORY_LEAF_KEY_HEX)" 'official directory leaf key default'
+  assert_eq '' "$(env_get DEEP_XPOINT_DIRECTORY_LEAF_KEY_HEX)" 'retired directory leaf is not generated'
   assert_eq '50m' "$(env_get DEEP_DOCKER_LOG_MAX_SIZE)" 'Docker log max-size default'
   assert_eq '5' "$(env_get DEEP_DOCKER_LOG_MAX_FILE)" 'Docker log max-file default'
 )
@@ -385,11 +385,90 @@ test_compose_contains_phase1_policy_and_logging() (
   grep -q 'max-file: ${DEEP_DOCKER_LOG_MAX_FILE:-5}' "$COMPOSE_FILE"
   grep -q 'RegistryRegistration__QuorumPolicyBackendBaseUrl: ${DEEP_STAKING_BACKEND_URL:?set DEEP_STAKING_BACKEND_URL}' "$COMPOSE_FILE"
   grep -q 'RegistryRegistration__EnforceQuorumSigningPolicy: ${DEEP_ENFORCE_QUORUM_SIGNING_POLICY:-true}' "$COMPOSE_FILE"
-  grep -q '^      ContactService__RuntimeActivation: "true"$' "$COMPOSE_FILE"
-  grep -q '^      ContactAuthority__XPointNetworkGenesisPinHex: ${DEEP_XPOINT_GENESIS_PIN_HEX:?set DEEP_XPOINT_GENESIS_PIN_HEX}$' "$COMPOSE_FILE"
-  grep -q '^      ContactRouteClosure__Enabled: "true"$' "$COMPOSE_FILE"
-  grep -q '^      RequiredTerminals__Contact: "true"$' "$COMPOSE_FILE"
+  grep -q '^      ContactService__RuntimeActivation: "false"$' "$COMPOSE_FILE"
+  grep -q '^      ContactAuthority__Enabled: "false"$' "$COMPOSE_FILE"
+  ! grep -q 'ContactRouteClosure__Enabled\|ContactAuthority__DirectoryLeafKeyHex' "$COMPOSE_FILE"
+  grep -q 'DEEP_DID2_CONFIG_FILE:?set DEEP_DID2_CONFIG_FILE' "$COMPOSE_FILE"
+  grep -q 'Node__ManagedIngressH2ListenUrl: http://172.31.241.10:8082' "$COMPOSE_FILE"
+  grep -q 'Node__PrivacyPeerH2ListenUrl: http://172.31.241.10:8083' "$COMPOSE_FILE"
+  grep -q '^      RequiredTerminals__Contact: "false"$' "$COMPOSE_FILE"
   grep -q '^      RequiredTerminals__GroupControl: "false"$' "$COMPOSE_FILE"
+)
+
+test_fresh_environment_asset_is_present_and_rerunnable() (
+  source "$INSTALLER"
+  local temp_dir before
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  ENV_FILE="$temp_dir/.env.node.prod"
+  write_env_template_if_missing
+  [ -f "$ENV_FILE" ]
+  before="$(sha256sum "$ENV_FILE")"
+  write_env_template_if_missing
+  assert_eq "$before" "$(sha256sum "$ENV_FILE")" 'fresh environment exact rerun'
+  assert_eq 'replace_with_registry_ipv4/32' "$(env_get DEEP_QUORUM_COORDINATOR_CIDR)" 'private deployment address absent from source template'
+  ! grep -q 'DEEP_NODE_ONION_RECEIVE_POSITION\|_compat/' "$ENV_FILE"
+)
+
+test_did2_runtime_selection_is_closed_and_rerunnable() (
+  source "$INSTALLER"
+  local temp_dir selected key suffix before
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  APP_DIR="$temp_dir"
+  ENV_FILE="$APP_DIR/.env.node.prod"
+  START_NODE=0
+  parse_args --did2-runtime-dir /operator/prepared-input
+  assert_eq '/operator/prepared-input' "$DID2_RUNTIME_DIR_ARG" 'explicit DID2 option'
+  DID2_RUNTIME_DIR_ARG=''
+  APP_DIR="$temp_dir"
+  ENV_FILE="$APP_DIR/.env.node.prod"
+  printf 'DEEP_NODE_ED25519_PUBLIC_KEY=retained\n' >"$ENV_FILE"
+  configure_did2_runtime
+  if (START_NODE=1; configure_did2_runtime) 2>/dev/null; then
+    printf 'FAIL: missing DID2 input allowed node activation\n' >&2; exit 1
+  fi
+  mkdir -p "$APP_DIR/config/did2-runtime/bundle-test/public" "$APP_DIR/secrets" "$APP_DIR/state"
+  printf '{}' >"$APP_DIR/config/did2-runtime/bundle-test/appsettings.Production.json"
+  printf 'retained-node-key' >"$APP_DIR/secrets/key_ed25519"
+  printf 'retained-floor' >"$APP_DIR/state/floor"
+  selected="$APP_DIR/config/did2-runtime.active.env"
+  {
+    printf 'DEEP_NODE_RUNTIME_ENVIRONMENT=UAT\n'
+    printf 'DEEP_DID2_CONFIG_FILE=./config/did2-runtime/bundle-test/appsettings.Production.json\n'
+    printf 'DEEP_DID2_PUBLIC_DIR=./config/did2-runtime/bundle-test/public\n'
+    for key in DEEP_DID2_ORIGIN DEEP_INGRESS_HOST DEEP_INGRESS_CERTIFICATE_PROFILE \
+      DEEP_NODE_X25519_PRIVATE_KEY_FILE DEEP_NODE_ONION_STATE_PROTECTION_FILE \
+      DEEP_INGRESS_CURRENT_CERT_FILE DEEP_INGRESS_CURRENT_KEY_FILE DEEP_INGRESS_CURRENT_SPKI_FILE \
+      DEEP_INGRESS_NEXT_CERT_FILE DEEP_INGRESS_NEXT_KEY_FILE DEEP_INGRESS_NEXT_SPKI_FILE; do
+      printf '%s=synthetic\n' "$key"
+    done
+    for key in 1 2; do
+      for suffix in ROUTER_ID BASE_URL CURRENT_SPKI_SHA256 NEXT_SPKI_SHA256; do
+        printf 'DEEP_PRIVACY_PEER_%s_%s=synthetic\n' "$key" "$suffix"
+      done
+    done
+  } >"$selected"
+  START_NODE=1
+  configure_did2_runtime
+  before="$(sha256sum "$ENV_FILE")"
+  configure_did2_runtime
+  assert_eq "$before" "$(sha256sum "$ENV_FILE")" 'DID2 exact rerun'
+  assert_eq 'retained-node-key' "$(<"$APP_DIR/secrets/key_ed25519")" 'DID2 does not rewrite registered key'
+  assert_eq 'retained-floor' "$(<"$APP_DIR/state/floor")" 'DID2 does not import diagnostic state'
+  for key in 'UNEXPECTED=value' 'DEEP_DID2_ORIGIN=repeated'; do
+    printf '%s\n' "$key" >>"$selected"
+    if (configure_did2_runtime) 2>/dev/null; then
+      printf 'FAIL: unsupported/repeated DID2 field accepted\n' >&2; exit 1
+    fi
+    assert_eq "$before" "$(sha256sum "$ENV_FILE")" 'invalid selection rejected before env mutation'
+    sed -i '$d' "$selected"
+  done
+  sed -i 's/DEEP_NODE_RUNTIME_ENVIRONMENT=UAT/DEEP_NODE_RUNTIME_ENVIRONMENT=Production/' "$selected"
+  if (configure_did2_runtime) 2>/dev/null; then
+    printf 'FAIL: candidate silently gained Production activation\n' >&2; exit 1
+  fi
+  assert_eq "$before" "$(sha256sum "$ENV_FILE")" 'unsupported profile rejected before env mutation'
 )
 
 test_existing_reality_sni_is_preserved() (
@@ -456,6 +535,8 @@ test_identity_and_ingress_secrets_are_stable
 test_docker_log_option_validation
 test_peer_endpoint_configuration
 test_compose_contains_phase1_policy_and_logging
+test_fresh_environment_asset_is_present_and_rerunnable
+test_did2_runtime_selection_is_closed_and_rerunnable
 test_existing_reality_sni_is_preserved
 test_bounded_scanner_result
 printf 'PASS: install-xpoint-node tests\n'

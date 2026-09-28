@@ -59,7 +59,7 @@ will not pass the start validation.
 
 Fixed onion receive-role arguments are retired. The new host derives permitted
 roles from signed current DID2 node descriptors. DID2 proof/observer/network-history
-deployment wiring remains a release prerequisite; running the installer alone is
+inputs must be supplied explicitly; running the installer alone is
 not evidence of a working messaging path. See [the node operator contract](../xnode/docs/operator.md).
 
 A purchased domain and an operator-managed/public-CA certificate are not
@@ -159,8 +159,8 @@ described as consuming this Reality port until the client-binding gate passes.
 
 ## Node-to-node topology
 
-For the three-router production topology, each node receives one role
-(`Ingress`, `Core`, or `Exit`) and exactly two peer descriptions. Each peer
+For the three-router production topology, each node derives its permitted roles
+from the current signed DID2 descriptor and receives exactly two peer descriptions. Each peer
 description binds the peer's Ed25519 router ID, canonical HTTPS origin, and two
 distinct SPKI pins. The node-to-node API and Reality share the public TLS port;
 the installer does not expose a plaintext peer port. Onion payloads remain
@@ -173,17 +173,37 @@ There is no operator-configurable signer URL. On production nodes the signer
 route is accepted only from the XPoint staking control-plane address and is
 rate-limited; other sources receive `404`.
 
-## Production ContactV1 authority
+## DID2 candidate installation (0.8.0)
 
-Installer 0.7.0 activates the ContactV1 terminal only against the official
-signed XPoint network authority. The public network ID, genesis authority-core
-pin and directory leaf key are written to `.env.node.prod`; they are trust
-anchors, not secrets. Existing non-placeholder values are preserved during a
-staged upgrade. Startup fails before replacing the running node when any value
-is missing, malformed, or zero, when the Registry package cannot be verified,
-or when ContactV1 readiness is unavailable. The group-control terminal remains
-disabled until its per-group GSR1/DCR1 publication workflow is connected; the
-installer must not imply group readiness from local storage alone.
+The compose no longer activates V1 ContactAuthority or group-control authority.
+Fresh preparation uses `--no-start`, followed by enrollment and externally
+prepared signed DID2 authority/network inputs. Starting without that input
+fails closed. Public onboarding is not open yet.
+
+For an existing registered node, supply the reviewed preparation bundle with
+`--did2-runtime-dir DIR`. It must contain the complete public manifest and
+signed history, public observer/head/configuration, descriptor-bound current
+and next origin certificates/keys, selected onion key, and the same original
+node identity/state-protection key. No offline authority signer is required
+on the host. The structural stager is not a protocol verifier: XNode independently
+authenticates the live directory proof, full network history and installed key.
+
+The installer validates custody before selecting a new owner-only immutable
+`config/did2-runtime/bundle-*` directory. Registered Ed25519/BLS keys, Reality
+credentials and the existing node-state volume are not replaced. Diagnostic
+state snapshots are never imported; incompatible or stale protected state
+must be diagnosed, not deleted to make startup pass. The active selector is
+retained for exact reruns, and the pre-update snapshot restores its prior
+selection if the installer fails.
+
+The current staged input explicitly selects `DEEP_NODE_RUNTIME_ENVIRONMENT=UAT`:
+this is a pre-release diagnostic software profile on the authorized production
+fleet, not a separate remote UAT environment. The default Production activation
+guard is not bypassed. Partial host readiness does not certify contact claims,
+messages, groups or device E2E. Both public configuration mounts are read-only;
+shared HTTPS ingress uses exact signed-origin TLS and separate proxy-scoped
+HTTP2 backend listeners. For now this bundle profile supports public IPv4
+origins on port 443. Do not use the alternate-port example above for this profile.
 
 ## Reality SNI
 

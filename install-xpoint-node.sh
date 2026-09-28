@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.7.0"
+INSTALLER_VERSION="0.8.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${XPOINT_NODE_DIR:-/opt/xpoint-node}"
 NON_INTERACTIVE=0
@@ -12,6 +12,7 @@ REALITY_MODE="${XPOINT_REALITY_MODE:-prompt}"
 CERTIFICATE_PROFILE="${XPOINT_CERTIFICATE_PROFILE:-pinned-self-issued}"
 IMPORT_DIR_ARG=""
 UPGRADE_DIR_ARG=""
+DID2_RUNTIME_DIR_ARG=""
 PEER_ARGS=()
 ROLLBACK_DIR=""
 ROLLBACK_REQUIRED=0
@@ -51,7 +52,6 @@ DEFAULT_QUORUM_POLICY_TIMEOUT_SECONDS="5"
 DEFAULT_QUORUM_SIGNATURE_TIMESTAMP_SKEW_SECONDS="300"
 DEFAULT_XPOINT_NETWORK_ID_HEX="edc5dc1516a847a65fc8ba0e690d000d"
 DEFAULT_XPOINT_GENESIS_PIN_HEX="304911104767ae1036a44c71116a5fcdee3449fc71ea1467c09295f89be3a2b7"
-DEFAULT_XPOINT_DIRECTORY_LEAF_KEY_HEX="3fd0371522bcfe473b36645f76a3817c722887fcbaa39ef75f4644a124d7b359"
 
 COMPOSE_FILE=""
 ENV_FILE=""
@@ -85,6 +85,8 @@ Options:
   --import-dir DIR             Import an existing .env.node.prod and secrets directory
   --upgrade-dir DIR            Apply a staged env/secrets set to an existing node after
                                verifying that every existing secret is byte-identical
+  --did2-runtime-dir DIR       Select an explicitly prepared DID2 public/origin/onion
+                               bundle; preserve registered identity and persistent state
   --xnode-image IMAGE          XPoint node image
   --storage-image IMAGE        Per-node storage service image
   --docker-log-max-size SIZE   Docker json-file max-size (default: 50m)
@@ -134,6 +136,7 @@ parse_args() {
       --peer) PEER_ARGS+=("${2:?missing value for --peer}"); shift 2 ;;
       --import-dir) IMPORT_DIR_ARG="${2:?missing value for --import-dir}"; shift 2 ;;
       --upgrade-dir) UPGRADE_DIR_ARG="${2:?missing value for --upgrade-dir}"; shift 2 ;;
+      --did2-runtime-dir) DID2_RUNTIME_DIR_ARG="${2:?missing value for --did2-runtime-dir}"; shift 2 ;;
       --xnode-image) XNODE_IMAGE_ARG="${2:?missing value for --xnode-image}"; shift 2 ;;
       --storage-image) STORAGE_IMAGE_ARG="${2:?missing value for --storage-image}"; shift 2 ;;
       --docker-log-max-size) DOCKER_LOG_MAX_SIZE_ARG="${2:?missing value for --docker-log-max-size}"; shift 2 ;;
@@ -421,7 +424,7 @@ restore_preupdate_backup() {
     done <"$ROLLBACK_DIR/image-tags.tsv"
   fi
   rm -rf "$SECRETS_DIR" "$INGRESS_CONFIG_DIR" "$RUNTIME_SCRIPTS_DIR"
-  rm -f "$ENV_FILE" "$COMPOSE_FILE"
+  rm -f "$ENV_FILE" "$COMPOSE_FILE" "$APP_DIR/config/did2-runtime.active.env"
   tar -C "$APP_DIR" -xzf "$ROLLBACK_DIR/config-and-secrets.tar.gz"
   chmod 700 "$SECRETS_DIR"
   find "$SECRETS_DIR" -type f -exec chmod 600 {} +
@@ -933,7 +936,6 @@ configure_env() {
   env_set DEEP_NETWORK "mainnet"
   env_set DEEP_XPOINT_NETWORK_ID_HEX "$(env_get DEEP_XPOINT_NETWORK_ID_HEX | grep -E '.+' || printf '%s' "$DEFAULT_XPOINT_NETWORK_ID_HEX")"
   env_set DEEP_XPOINT_GENESIS_PIN_HEX "$(env_get DEEP_XPOINT_GENESIS_PIN_HEX | grep -E '.+' || printf '%s' "$DEFAULT_XPOINT_GENESIS_PIN_HEX")"
-  env_set DEEP_XPOINT_DIRECTORY_LEAF_KEY_HEX "$(env_get DEEP_XPOINT_DIRECTORY_LEAF_KEY_HEX | grep -E '.+' || printf '%s' "$DEFAULT_XPOINT_DIRECTORY_LEAF_KEY_HEX")"
   env_set DEEP_INGRESS_CERTIFICATE_PROFILE "$CERTIFICATE_PROFILE"
   env_set DEEP_INGRESS_HOST "$(env_get DEEP_NODE_PUBLIC_HOST)"
   env_set DEEP_INGRESS_HTTPS_BIND "$(env_get DEEP_NODE_PUBLIC_PORT)"
@@ -1312,6 +1314,60 @@ ensure_ingress_certificates() {
   env_set DEEP_INGRESS_NEXT_SPKI_FILE "./secrets/ingress/next.spki-sha256"
 }
 
+configure_did2_runtime() {
+  local selected="$APP_DIR/config/did2-runtime.active.env"
+  local staged_dir key value count=0
+  if [ -n "$DID2_RUNTIME_DIR_ARG" ]; then
+    staged_dir="$(mktemp -d "$APP_DIR/.did2-stage.XXXXXX")"
+    if ! node "$SCRIPT_DIR/assets/scripts/stage-did2-runtime.cjs" \
+        "$DID2_RUNTIME_DIR_ARG" "$APP_DIR" "$staged_dir/updates.env"; then
+      rmdir "$staged_dir" 2>/dev/null || true
+      fail "DID2 runtime inputs failed bounded custody validation."
+    fi
+    [ ! -L "$selected" ] && { [ ! -e "$selected" ] || [ -f "$selected" ]; } \
+      || fail "DID2 active inputs must be an unredirected regular file."
+    chmod 600 "$staged_dir/updates.env"
+    mv -T "$staged_dir/updates.env" "$selected"
+    rmdir "$staged_dir"
+  fi
+  if [ ! -f "$selected" ]; then
+    [ "$START_NODE" -eq 0 ] && return 0
+    fail "DID2 runtime inputs are required; prepare/enroll the node and supply --did2-runtime-dir."
+  fi
+  [ ! -L "$selected" ] && [ "$(wc -c <"$selected")" -le 16384 ] \
+    || fail "DID2 active input file is redirected or oversized."
+  declare -A seen=() values=()
+  while IFS='=' read -r key value; do
+    [ -n "$key" ] || continue
+    count=$((count + 1))
+    [ "$count" -le 32 ] && [ -z "${seen[$key]:-}" ] \
+      || fail "DID2 active inputs contain repeated or excessive fields."
+    seen[$key]=1
+    case "$key" in
+      DEEP_NODE_RUNTIME_ENVIRONMENT|DEEP_DID2_CONFIG_FILE|DEEP_DID2_PUBLIC_DIR|DEEP_DID2_ORIGIN|DEEP_INGRESS_HOST|DEEP_INGRESS_CERTIFICATE_PROFILE|\
+      DEEP_NODE_X25519_PRIVATE_KEY_FILE|DEEP_NODE_ONION_STATE_PROTECTION_FILE|\
+      DEEP_INGRESS_CURRENT_CERT_FILE|DEEP_INGRESS_CURRENT_KEY_FILE|DEEP_INGRESS_CURRENT_SPKI_FILE|\
+      DEEP_INGRESS_NEXT_CERT_FILE|DEEP_INGRESS_NEXT_KEY_FILE|DEEP_INGRESS_NEXT_SPKI_FILE|\
+      DEEP_PRIVACY_PEER_[12]_ROUTER_ID|DEEP_PRIVACY_PEER_[12]_BASE_URL|\
+      DEEP_PRIVACY_PEER_[12]_CURRENT_SPKI_SHA256|DEEP_PRIVACY_PEER_[12]_NEXT_SPKI_SHA256) ;;
+      *) fail "DID2 active inputs contain an unsupported field." ;;
+    esac
+    [ -n "$value" ] || fail "DID2 active input value is empty."
+    values[$key]="$value"
+  done <"$selected"
+  [ "$count" -eq 22 ] || fail "DID2 active inputs are incomplete."
+  [ "${values[DEEP_NODE_RUNTIME_ENVIRONMENT]}" = UAT ] \
+    || fail "DID2 candidate inputs require the explicit diagnostic runtime profile."
+  local config public
+  config="${values[DEEP_DID2_CONFIG_FILE]}"
+  public="${values[DEEP_DID2_PUBLIC_DIR]}"
+  [[ "$config" =~ ^\./config/did2-runtime/bundle-[A-Za-z0-9_-]+/appsettings\.Production\.json$ ]] \
+    || fail "DID2 config path is outside the installer custody directory."
+  [ "$public" = "${config%/*}/public" ] && [ -f "$APP_DIR/$config" ] && [ -d "$APP_DIR/$public" ] \
+    || fail "DID2 installed config/public inputs are missing."
+  for key in "${!values[@]}"; do env_set "$key" "${values[$key]}"; done
+}
+
 validate_address() {
   local value="$1"
   [[ "$value" =~ ^0x[0-9a-fA-F]{40}$ ]] || return 1
@@ -1331,7 +1387,9 @@ validate_for_start() {
     DEEP_REGISTRY_URL \
     DEEP_XPOINT_NETWORK_ID_HEX \
     DEEP_XPOINT_GENESIS_PIN_HEX \
-    DEEP_XPOINT_DIRECTORY_LEAF_KEY_HEX \
+    DEEP_DID2_CONFIG_FILE \
+    DEEP_DID2_PUBLIC_DIR \
+    DEEP_DID2_ORIGIN \
     DEEP_STAKING_BACKEND_URL \
     DEEP_ARBITRUM_RPC_URL \
     DEEP_SERVICE_NODE_REWARDS_ADDRESS \
@@ -1366,8 +1424,6 @@ validate_for_start() {
     || missing+=("DEEP_XPOINT_NETWORK_ID_HEX")
   is_canonical_hex32 "$(env_get DEEP_XPOINT_GENESIS_PIN_HEX)" \
     || missing+=("DEEP_XPOINT_GENESIS_PIN_HEX")
-  is_canonical_hex32 "$(env_get DEEP_XPOINT_DIRECTORY_LEAF_KEY_HEX)" \
-    || missing+=("DEEP_XPOINT_DIRECTORY_LEAF_KEY_HEX")
   if ! validate_address "$(env_get DEEP_REWARDS_ADDRESS)"; then
     missing+=("DEEP_REWARDS_ADDRESS")
   fi
@@ -1517,6 +1573,7 @@ main() {
   generate_identity_if_needed
   ensure_reality_keys
   ensure_ingress_certificates
+  configure_did2_runtime
   configure_firewall_if_active
   start_or_update_node
   ROLLBACK_REQUIRED=0

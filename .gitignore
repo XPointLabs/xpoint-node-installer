@@ -1,4 +1,5 @@
 .env*
+!assets/.env.node.prod.example
 secrets/
 tools/
 identity.generated.env

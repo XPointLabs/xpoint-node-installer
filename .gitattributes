@@ -1,3 +1,5 @@
 *.sh text eol=lf
 *.md text eol=lf
 *.yml text eol=lf
+assets/.env.node.prod.example text eol=lf
+assets/scripts/*.cjs text eol=lf
