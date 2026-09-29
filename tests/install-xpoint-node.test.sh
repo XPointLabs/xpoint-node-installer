@@ -395,6 +395,24 @@ test_compose_contains_phase1_policy_and_logging() (
   grep -q '^      RequiredTerminals__GroupControl: "false"$' "$COMPOSE_FILE"
 )
 
+test_durable_node_state_and_restart_policy_are_installed() (
+  source "$INSTALLER"
+  local temp_dir
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  APP_DIR="$temp_dir"
+  COMPOSE_FILE="$temp_dir/docker-compose.node.prod.yml"
+  write_compose_file
+  local node_block
+  node_block="$(sed -n '/^  xnode:$/,/^  storage-service:$/p' "$COMPOSE_FILE")"
+  grep -q '^    restart: unless-stopped$' <<<"$node_block"
+  grep -q '^      Node__DataDirectory: /var/lib/xnode$' <<<"$node_block"
+  grep -q '^      - xnode-state:/var/lib/xnode$' <<<"$node_block"
+  grep -q '^  xnode-state:$' "$COMPOSE_FILE"
+  ! grep -q '^      - /var/lib/xnode$' <<<"$node_block"
+  ! grep -q 'tmpfs:.*xnode\|/var/lib/xnode:.*tmpfs' <<<"$node_block"
+)
+
 test_fresh_environment_asset_is_present_and_rerunnable() (
   source "$INSTALLER"
   local temp_dir before
@@ -579,6 +597,7 @@ test_identity_and_ingress_secrets_are_stable
 test_docker_log_option_validation
 test_peer_endpoint_configuration
 test_compose_contains_phase1_policy_and_logging
+test_durable_node_state_and_restart_policy_are_installed
 test_fresh_environment_asset_is_present_and_rerunnable
 test_did2_runtime_selection_is_closed_and_rerunnable
 test_node_runtime_is_bounded_on_old_hosts

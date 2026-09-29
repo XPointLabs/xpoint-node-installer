@@ -121,6 +121,23 @@ echo "$GITHUB_TOKEN" | docker login ghcr.io -u USERNAME --password-stdin
 If `docker compose pull` fails but both images are already preloaded locally,
 the installer continues with the local images.
 
+## Restart and retained state
+
+The installed XNode uses `restart: unless-stopped` and the named `xnode-state`
+volume at `/var/lib/xnode`. An explicit `docker compose stop xnode` remains
+stopped until the operator starts it. Restart/recreate and installer reruns
+must keep that volume, the registered Ed25519/BLS identity, protection keys and
+DID2 key ring/floor/anchor together. Do not use `down --volumes`, volume prune,
+manual floor deletion or identity regeneration as recovery steps.
+
+An alive container is not proof of usable signed authority. Temporary loss
+of Registry/proofs leaves the new runtime unready until a fresh verified
+binding returns. The installer health gate may fail/roll back an upgrade
+while authority is unavailable; it does not manufacture fresh time, rotate
+signed network views or reset protected state. See the
+[runtime operator contract](../xnode/docs/operator.md) and
+[recovery fault matrix](../deep-devops/docs/NETWORK_STABILITY_RECOVERY.md).
+
 ## Docker Logs And Disk Use
 
 The installer writes both host-level Docker daemon defaults and compose-level
