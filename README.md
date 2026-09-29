@@ -205,6 +205,12 @@ must be diagnosed, not deleted to make startup pass. The active selector is
 retained for exact reruns, and the pre-update snapshot restores its prior
 selection if the installer fails.
 
+A successor's longer signed-history path list selects a new immutable bundle.
+Its new records are not required in the previous bundle. Exact unchanged reruns
+still compare retained files byte-for-byte and reject a missing retained record.
+The stager never advances a protected network floor; only XNode's full Protocol
+verification can do that after activation.
+
 The current staged input explicitly selects `DEEP_NODE_RUNTIME_ENVIRONMENT=UAT`:
 this is a pre-release diagnostic software profile on the authorized production
 fleet, not a separate remote UAT environment. The default Production activation
