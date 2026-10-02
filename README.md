@@ -201,7 +201,10 @@ rate-limited; other sources receive `404`.
 
 ## DID2 candidate installation (0.8.1)
 
-The compose no longer activates V1 ContactAuthority or group-control authority.
+The compose omits retired `ContactAuthority` and `GroupControlAuthority`
+configuration completely, including disabled flags. The DID2-only host rejects
+these sections even when `Enabled=false`; regenerated compose must match the
+current runtime, without a legacy fallback or state reset.
 Fresh preparation uses `--no-start`, followed by enrollment and externally
 prepared signed DID2 authority/network inputs. Starting without that input
 fails closed. Public onboarding is not open yet.
