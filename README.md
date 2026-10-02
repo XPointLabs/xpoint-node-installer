@@ -206,6 +206,11 @@ Fresh preparation uses `--no-start`, followed by enrollment and externally
 prepared signed DID2 authority/network inputs. Starting without that input
 fails closed. Public onboarding is not open yet.
 
+The preparation manifest must retain all eight current public record roles,
+including PMA2, with contiguous per-role ordinals and exact file hashes. The
+stager copies PMA2 without promoting it to a placement path or grant authority;
+an older incomplete manifest is rejected before selecting a new installation.
+
 For an existing registered node, supply the reviewed preparation bundle with
 `--did2-runtime-dir DIR`. It must contain the complete public manifest and
 signed history, public observer/head/configuration, descriptor-bound current
