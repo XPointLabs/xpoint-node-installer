@@ -230,6 +230,15 @@ must be diagnosed, not deleted to make startup pass. The active selector is
 retained for exact reruns, and the pre-update snapshot restores its prior
 selection if the installer fails.
 
+Preparation with the DevOps `--contact-runtime` option adds only the closed
+DID2 coordination/resolver/prekey-claim profile to the staged configuration.
+The backend must be the existing Registry origin; partial profiles, unexpected
+fields and mailbox-grant activation reject before selection. The installer
+does not enable the retired ContactService authority or provision Registry
+signers, private-node access or durable coordination journals. Verify those
+dependencies separately before deploying the candidate. Staging is not physical
+contact or messaging evidence.
+
 A successor's longer signed-history path list selects a new immutable bundle.
 Its new records are not required in the previous bundle. Exact unchanged reruns
 still compare retained files byte-for-byte and reject a missing retained record.
