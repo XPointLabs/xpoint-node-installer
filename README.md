@@ -211,8 +211,14 @@ fails closed. Public onboarding is not open yet.
 
 The preparation manifest must retain all eight current public record roles,
 including PMA2, with contiguous per-role ordinals and exact file hashes. The
-stager copies PMA2 without promoting it to a placement path or grant authority;
+host configuration must include `DeepIdV2NetworkPlacement:ExactMailboxAuthorityPaths`.
+The stager copies that exact public chain without promoting it to grant authority;
 an older incomplete manifest is rejected before selecting a new installation.
+Older public configurations omitting the paths also reject. Re-export/re-prepare
+the complete public bundle and use a matched XNode/installer; no node-key or
+protected-floor reset is required. XNode independently verifies the PMA2 named
+by current PMT2 before advancing its floor and before releasing authority. This
+does not activate the dormant mailbox/replica graph or establish delivery.
 
 For an existing registered node, supply the reviewed preparation bundle with
 `--did2-runtime-dir DIR`. It must contain the complete public manifest and
