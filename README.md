@@ -230,6 +230,12 @@ must be diagnosed, not deleted to make startup pass. The active selector is
 retained for exact reruns, and the pre-update snapshot restores its prior
 selection if the installer fails.
 
+An upgrade must retain the contact-enabled prepared bundle. Staging rejects
+replacement of an installed contact profile with a prekey-only bundle before
+creating or selecting another bundle; a successful image/health check is not
+contact-coordination readiness. Existing keys and state are not reset to fix
+this error.
+
 Preparation with the DevOps `--contact-runtime` option adds only the closed
 DID2 coordination/resolver/prekey-claim profile to the staged configuration.
 The backend must be the existing Registry origin; partial profiles, unexpected
