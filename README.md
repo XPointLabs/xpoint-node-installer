@@ -201,6 +201,14 @@ rate-limited; other sources receive `404`.
 
 ## DID2 candidate installation (0.8.1)
 
+Current mailbox DI/configuration is documented by the
+[XNode operator guide](../xnode/docs/operator.md#current-mailbox-host-composition-candidate).
+This installer does not yet provision the two signed MGR1 role enrollments or
+the independent protected operation custody. Leave mailbox disabled until that
+reviewed lifecycle is supported; public DID2 staging and a healthy transport do
+not authorize current mailbox activation. Old mailbox authority sections are
+rejected by the current host, not migrated or converted.
+
 The compose omits retired `ContactAuthority` and `GroupControlAuthority`
 configuration completely, including disabled flags. The DID2-only host rejects
 these sections even when `Enabled=false`; regenerated compose must match the
